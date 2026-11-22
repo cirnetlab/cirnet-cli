@@ -1,0 +1,27 @@
+name: Windows CLI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  cli:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check, test and build cnl
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'cnl-target'
+          cargo fmt --all --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          cargo build --locked --release
+          & (Join-Path $env:CARGO_TARGET_DIR 'release/cnl.exe') --help
