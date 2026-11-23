@@ -18,16 +18,11 @@
 
 ## 1. System Requirements
 
-Dự án được thiết kế cho **Windows x64** và sử dụng các công cụ sau:
-
 | Công cụ | Phiên bản yêu cầu | Mục đích |
 |---|---|---|
-| Windows | x64 | Hệ điều hành mục tiêu |
 | Rust | 1.99.1 | Ngôn ngữ lập trình chính |
 | Cargo | Theo Rust 1.99.1 | Build và quản lý dependencies |
 | PowerShell | 7.4 trở lên | Thực thi lệnh và tự động hóa |
-| Visual Studio | 2022 C++ Build Tools | Biên dịch native Windows |
-| Windows SDK | Tương thích VS 2022 | Windows API và thư viện hệ thống |
 | CMake | Phiên bản tương thích | Build các thành phần C/C++ |
 | Node.js | 26.x | Môi trường thực thi frontend |
 | npm | Đi kèm Node.js | Quản lý frontend dependencies |
