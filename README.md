@@ -2,7 +2,7 @@
 
 ![GitHub repo size](https://img.shields.io/github/repo-size/cirnetlab/cirnet-cli)
 [![GitHub License](https://img.shields.io/github/license/cirnetlab/cirnet-cli)](https://github.com/cirnetlab/cirnet-cli/blob/master/LICENSE)
-
+![GitHub Issues](https://img.shields.io/github/issues/cirnetlab/cirnet-cli)
 
 **CIRNETLAB CLI (`cnl`)** is a command-line tool developed in Rust that supports repository management, development environment setup, compilation, testing, and operation of the CIRNETLAB system.
 
