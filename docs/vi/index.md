@@ -1,6 +1,6 @@
 # Phát triển native CIRNETLAB
 
-[English](../en/index.md)
+[English](../en/index.md) · [Tham chiếu lệnh CNL và Cargo](commands.md)
 
 `cnl` build và vận hành hệ thống phát triển Windows x64. Remote quản lý bộ đầu vào chính xác, manifest và trình tự dừng Hardware và Simulator. CLI dùng Interface hiện có và tuân theo [kiến trúc mục tiêu CIRNETLAB](https://github.com/cirnetlab/cirnet-remote-next/blob/233bd694f0c1005ad9aa7c9882d636f68a3e170d/docs/cirnetlab-architecture-vi.md).
 

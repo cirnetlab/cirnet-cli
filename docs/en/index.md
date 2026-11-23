@@ -1,6 +1,6 @@
 # CIRNETLAB native development
 
-[Tiếng Việt](../vi/index.md)
+[Tiếng Việt](../vi/index.md) · [CNL and Cargo command reference](commands.md)
 
 `cnl` builds and operates the Windows x64 development stack. Remote owns the exact system selection, manifests, and the Hardware and Simulator shutdown sequence. The CLI uses the existing Interface and exposes the [CIRNETLAB target architecture](https://github.com/cirnetlab/cirnet-remote-next/blob/233bd694f0c1005ad9aa7c9882d636f68a3e170d/docs/cirnetlab-architecture-en.md).
 
