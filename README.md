@@ -1,7 +1,6 @@
 # CIRNETLAB CLI
 
 ![GitHub repo size](https://img.shields.io/github/repo-size/cirnetlab/cirnet-cli)
-![GitHub License](https://img.shields.io/github/license/cirnetlab/cirnet-cli)
 [![GitHub License](https://img.shields.io/github/license/cirnetlab/cirnet-cli)](https://github.com/cirnetlab/cirnet-cli/blob/master/LICENSE)
 
 
