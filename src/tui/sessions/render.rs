@@ -9,13 +9,17 @@ use super::{
     Manager, Session, SessionId, Tone,
     layout::{Layout, Pane, Rect},
     locale, terminal_line,
-    workspace::{Command, Modal, State, menu_commands},
+    workspace::{Command, MENU_GROUPS, Modal, State},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Hit {
     Command(Command),
     Session(SessionId),
+    PaneActions(SessionId),
+    SidebarSearch,
+    FindNext,
+    FindPrevious,
     Step(usize),
     Accept,
     Cancel,
@@ -54,12 +58,9 @@ pub(super) fn frame(manager: &Manager, layout: &Layout, state: &State) -> (Frame
     let mut frame = Frame::new(state.size);
     let mut hits = Hits::default();
     let vi = state.vi;
-    toolbar(&mut frame, &mut hits, manager, vi);
-    let focus = if state.modal.is_none() && !manager.arrangement.sidebar_focused {
-        manager.arrangement.active()
-    } else {
-        None
-    };
+    toolbar(&mut frame, &mut hits, manager, state);
+    let cursor_enabled =
+        state.modal.is_none() && state.find.is_none() && !manager.arrangement.sidebar_focused;
     for (index, pane) in layout.panes.into_iter().enumerate() {
         if index == 1
             && let Some(x) = layout.vertical_divider
@@ -69,7 +70,15 @@ pub(super) fn frame(manager: &Manager, layout: &Layout, state: &State) -> (Frame
         if let Some(pane) = pane
             && let Some(session) = manager.session(pane.id)
         {
-            terminal(&mut frame, pane, session, focus == Some(pane.id), vi);
+            terminal(
+                &mut frame,
+                &mut hits,
+                pane,
+                session,
+                manager.arrangement.active() == Some(pane.id),
+                cursor_enabled,
+                state,
+            );
         }
     }
     if let Some(y) = layout.horizontal_divider {
@@ -99,9 +108,13 @@ pub(super) fn frame(manager: &Manager, layout: &Layout, state: &State) -> (Frame
         if area.x > 0 {
             vertical(&mut frame, area.x - 1, area.y, area.bottom());
         }
-        sidebar(&mut frame, &mut hits, manager, area, vi);
+        sidebar(&mut frame, &mut hits, manager, area, state);
     }
-    footer(&mut frame, manager, state);
+    if state.find.is_some() {
+        find_bar(&mut frame, &mut hits, manager, state);
+    } else {
+        footer(&mut frame, manager, state);
+    }
     if let Some(modal) = &state.modal {
         // Use only the modal's hit regions while it owns the screen.
         hits.0.clear();
@@ -110,73 +123,132 @@ pub(super) fn frame(manager: &Manager, layout: &Layout, state: &State) -> (Frame
     (frame, hits)
 }
 
-fn toolbar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, vi: bool) {
+fn action_title(command: Command, manager: &Manager, vi: bool) -> &'static str {
+    match command {
+        Command::Split if manager.arrangement.split_active() => locale(["Unsplit", "Bỏ chia"], vi),
+        Command::Maximize if manager.arrangement.is_maximized() => {
+            locale(["Restore panes", "Khôi phục ô"], vi)
+        }
+        _ => command.title(vi),
+    }
+}
+
+fn toolbar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State) {
     let Some(row) = frame.rows.first_mut() else {
         return;
     };
+    let vi = state.vi;
     let width = frame.size.0;
-    let title = if width >= 80 {
-        " CIRNET LAB  /  TERMINAL"
-    } else {
-        " TERMINAL"
-    };
-    write_span(row, Tone::Accent, title, width);
-    for command in [
+    let controls = [
         Command::New,
         Command::Split,
         Command::Sidebar,
         Command::Menu,
-    ] {
-        let name = if command == Command::Split && manager.arrangement.split_active() {
-            locale(["Unsplit", "Bỏ chia"], vi)
-        } else {
-            command.title(vi)
-        };
-        let text = if width >= 80 {
-            format!(" {} {name} ", command.shortcut())
-        } else {
-            format!(" {} ", command.shortcut())
-        };
+    ];
+    let compact = width < 45;
+    let labels = if compact {
+        ["+", "◫", "≡", "⋯"]
+    } else if width >= 76 {
+        controls.map(|cmd| action_title(cmd, manager, vi))
+    } else {
+        [
+            locale(["New", "Mới"], vi),
+            action_title(Command::Split, manager, vi),
+            Command::Sidebar.title(vi),
+            Command::Menu.title(vi),
+        ]
+    };
+    let reserved = labels.iter().map(|label| label.width() + 3).sum::<usize>() as u16;
+    let end = width.saturating_sub(reserved);
+    let title = if width >= 76 {
+        " CIRNET LAB / Terminal"
+    } else {
+        " Terminal"
+    };
+    let caption = manager.active().map_or_else(
+        || title.to_owned(),
+        |active| format!("{title} · {}", active.repository),
+    );
+    write_span(row, Tone::Accent, &ellipsize(&caption, end as usize), end);
+    for (command, label) in controls.into_iter().zip(labels) {
+        let text = format!(" {label} ");
         let start = row_width(row);
-        let space = if start > 0 { 1 } else { 0 };
-        if start + space + text.width() as u16 > width {
-            continue;
+        let button_width = text.width() as u16;
+        if start + 1 + button_width > width {
+            break;
         }
         row.push(BORDER, "│");
-        row.push(Tone::Key, &text);
-        hits.row(start + space, 0, text.width() as u16, Hit::Command(command));
+        row.push(
+            if !state.enabled(manager, command) {
+                Tone::Muted
+            } else if state.hovered_command == Some(command) {
+                SELECTED
+            } else {
+                Tone::Key
+            },
+            &text,
+        );
+        hits.row(start + 1, 0, button_width, Hit::Command(command));
     }
 }
 
-fn terminal(frame: &mut Frame, pane: Pane, session: &Session, focused: bool, vi: bool) {
+fn terminal(
+    frame: &mut Frame,
+    hits: &mut Hits,
+    pane: Pane,
+    session: &Session,
+    focused: bool,
+    cursor_enabled: bool,
+    state: &State,
+) {
     let body = pane.body;
     let output = session.output.lock().unwrap();
     let screen = output.parser.screen();
     let header = &mut frame.rows[usize::from(body.y - 1)];
     pad(header, body.x, Tone::Plain);
-    let header_tone = if focused {
-        Tone::Accent
-    } else {
-        Tone::Punctuation
-    };
+    let header_tone = if focused { Tone::Accent } else { Tone::Heading };
     let marker = if focused { "▌" } else { " " };
     let label = if session.label.is_some() {
-        format!("{marker} {} / {} ", session.repository, session.title())
+        format!("{marker} {} / {}", session.repository, session.title())
     } else {
-        format!("{marker} {} ", session.repository)
+        format!("{marker} {}", session.repository)
     };
-    let status = if output.exit.is_some() {
-        format!(
-            " {} · {} ",
-            session.shell,
-            locale(["Exited", "Đã thoát"], vi)
-        )
-    } else {
-        format!(" {} ", session.shell)
-    };
-    let name_end = body.right().saturating_sub(status.width() as u16 + 1);
-    write_span(header, header_tone, &label, name_end.max(body.x + 1));
-    write_span(header, Tone::Muted, &status, body.right());
+    let indicator = if output.exit.is_some() { "×" } else { "●" };
+    let status = format!(" {indicator} {} ", shell_label(session.shell.as_str()));
+    let actions = if body.width >= 14 { 3 } else { 0 };
+    let status_end = body.right() - actions;
+    let status_start = status_end.saturating_sub(status.width() as u16).max(body.x);
+    write_span(
+        header,
+        header_tone,
+        &ellipsize(&label, usize::from(status_start - body.x)),
+        status_start,
+    );
+    pad(header, status_start, SURFACE);
+    write_span(
+        header,
+        if output.exit.is_some() {
+            Tone::Warning
+        } else {
+            Tone::Success
+        },
+        &status,
+        status_end,
+    );
+    pad(header, status_end, SURFACE);
+    if actions != 0 {
+        write_span(header, Tone::Key, " ⋯ ", body.right());
+        hits.row(status_end, body.y - 1, actions, Hit::PaneActions(pane.id));
+    }
+    let mark = state
+        .marked
+        .as_ref()
+        .filter(|mark| mark.has_range && mark.valid(pane.id, &output));
+    let found = state
+        .find
+        .as_ref()
+        .filter(|find| find.id == pane.id)
+        .and_then(|find| find.visible(&output));
     let (rows, cols) = screen.size();
     let visible_rows = rows.get().min(body.height);
     let visible_cols = cols.get().min(body.width);
@@ -184,7 +256,15 @@ fn terminal(frame: &mut Frame, pane: Pane, session: &Session, focused: bool, vi:
         let line = &mut frame.rows[usize::from(row + body.y)];
         pad(line, body.x, Tone::Plain);
         if row < visible_rows {
-            let contents = terminal_line(screen, row, visible_cols);
+            let contents = terminal_line(screen, row, visible_cols, |column| {
+                if mark.is_some_and(|mark| mark.cells.contains(row, column)) {
+                    Some(Tone::Selection)
+                } else if found.is_some_and(|found| found.contains(screen, row, column)) {
+                    Some(Tone::Match)
+                } else {
+                    None
+                }
+            });
             for (tone, segment) in contents.segments() {
                 line.push(tone, segment);
             }
@@ -192,6 +272,7 @@ fn terminal(frame: &mut Frame, pane: Pane, session: &Session, focused: bool, vi:
     }
     let (row, col) = screen.cursor_position();
     if focused
+        && cursor_enabled
         && output.exit.is_none()
         && screen.scrollback() == 0
         && !screen.hide_cursor()
@@ -210,100 +291,178 @@ fn vertical(frame: &mut Frame, x: u16, start: u16, end: u16) {
     }
 }
 
-fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, vi: bool) {
+fn shell_label(shell: &str) -> &str {
+    match shell {
+        "powershell" => "PWSh",
+        "cmd" => "CMD",
+        "bash" => "Bash",
+        "wsl" => "WSL",
+        _ => shell,
+    }
+}
+
+fn ellipsize(value: &str, columns: usize) -> std::borrow::Cow<'_, str> {
+    if value.width() <= columns {
+        return value.into();
+    }
+    if columns == 0 {
+        return "".into();
+    }
+    let mut end = 0;
+    let mut used = 1;
+    for grapheme in value.graphemes(true) {
+        used += grapheme.width();
+        if used > columns {
+            break;
+        }
+        end += grapheme.len();
+    }
+    format!("{}…", &value[..end]).into()
+}
+
+fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, state: &State) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let heading = format!(
-        " {}  {:02}",
+    let vi = state.vi;
+    let ids = state.sidebar_ids(manager);
+    let active = manager.arrangement.active();
+    let selected = state.sidebar_selected.or(active);
+    let title = format!(
+        " {} · {}",
         locale(["SESSIONS", "PHIÊN"], vi),
         manager.entries.len()
     );
-    let height = if area.height >= 11 { 2 } else { 1 };
-    let capacity = usize::from(area.height.saturating_sub(1) / height);
-    let focus = manager
-        .arrangement
-        .active()
-        .and_then(|id| manager.position(id))
-        .unwrap_or_default();
-    let start = list_start(focus, capacity, manager.entries.len());
-    sidebar_line(frame, area, area.y, SURFACE, &heading);
-    for (offset, session) in manager
-        .entries
-        .iter()
-        .skip(start)
-        .take(capacity)
-        .enumerate()
+    for y in area.y..area.bottom() {
+        sidebar_line(
+            frame,
+            area,
+            y,
+            SURFACE,
+            if y == area.y { &title } else { "" },
+        );
+    }
+    if area.width >= 16 {
+        let x = area.right() - 3;
+        let mut search = Line::default();
+        search.push(SELECTED, " / ");
+        overlay(frame, x, area.y, 3, &search);
+        hits.row(x, area.y, 3, Hit::SidebarSearch);
+    }
+    let mut list_y = area.y + 1;
+    if let Some(query) = &state.sidebar_query
+        && area.height > 2
     {
-        let row = area.y + 1 + offset as u16 * height;
-        let active = manager.arrangement.active() == Some(session.id);
-        let pane = manager
-            .arrangement
-            .panes
-            .iter()
-            .position(|id| *id == Some(session.id));
-        let marker = if active {
+        let prefix = "/ ";
+        let (left, column) = input_window(query, area.width.saturating_sub(3));
+        sidebar_line(
+            frame,
+            area,
+            list_y,
+            SELECTED,
+            &format!(
+                "{prefix}{}",
+                if query.value.is_empty() {
+                    locale(["Filter sessions", "Lọc phiên"], vi)
+                } else {
+                    &query.value[left..]
+                }
+            ),
+        );
+        if state.modal.is_none() && state.find.is_none() && manager.arrangement.sidebar_focused {
+            frame.cursor = Some(((area.x + 2 + column).min(area.right() - 1), list_y));
+        }
+        list_y += 1;
+    }
+    let detail_height = if area.height >= 7 && selected.is_some() {
+        2
+    } else {
+        0
+    };
+    let capacity = (area.bottom().saturating_sub(list_y + detail_height)) as usize;
+    let index = selected
+        .and_then(|id| ids.iter().position(|entry| *entry == id))
+        .unwrap_or_default();
+    let mut start = list_start(index, capacity, ids.len());
+    if let Some(active) = active.and_then(|id| ids.iter().position(|entry| *entry == id))
+        && active.abs_diff(index) < capacity
+    {
+        start = start
+            .min(active)
+            .max(active.saturating_add(1).saturating_sub(capacity));
+    }
+    if ids.is_empty() && capacity > 0 {
+        sidebar_line(
+            frame,
+            area,
+            list_y,
+            SURFACE,
+            locale([" No matching sessions", " Không có phiên phù hợp"], vi),
+        );
+    }
+    for (offset, id) in ids.into_iter().skip(start).take(capacity).enumerate() {
+        let Some(session) = manager.session(id) else {
+            continue;
+        };
+        let y = list_y + offset as u16;
+        let focused = Some(id) == selected && manager.arrangement.sidebar_focused;
+        let running = session.running();
+        let marker = if Some(id) == active {
             "›"
-        } else if pane.is_some() {
+        } else if manager.arrangement.panes.contains(&Some(id)) {
             "·"
         } else {
             " "
         };
-        let surface = if active { SELECTED } else { SURFACE };
-        let running = session.running();
-        let status = if running {
+        let tone = if focused || Some(id) == active || state.sidebar_hover == Some(id) {
+            SELECTED
+        } else {
+            SURFACE
+        };
+        let right = format!(
+            " {} {} ",
+            shell_label(&session.shell),
+            if running { "●" } else { "×" }
+        );
+        let left = format!(" {marker} {}", session.title());
+        let room = usize::from(area.width).saturating_sub(right.width());
+        let left = ellipsize(&left, room);
+        let line = format!(
+            "{left}{}{right}",
+            " ".repeat(room.saturating_sub(left.width()))
+        );
+        sidebar_line(frame, area, y, tone, &line);
+        hits.row(area.x, y, area.width, Hit::Session(id));
+    }
+    if detail_height > 0
+        && let Some(session) = state
+            .sidebar_hover
+            .or(selected)
+            .and_then(|id| manager.session(id))
+    {
+        let at = area.bottom() - 2;
+        sidebar_line(
+            frame,
+            area,
+            at,
+            SURFACE,
+            &format!(
+                " {}",
+                ellipsize(session.title(), area.width.saturating_sub(1) as usize)
+            ),
+        );
+        let status = if session.running() {
             locale(["Running", "Đang chạy"], vi)
         } else {
             locale(["Exited", "Đã thoát"], vi)
         };
-        let title = if session.label.is_some() {
-            format!(" {marker} {}  {}", session.title(), session.repository)
-        } else {
-            format!(" {marker} {}", session.repository)
-        };
-        if height == 2 {
-            sidebar_line(frame, area, row, surface, &title);
-            sidebar_line(
-                frame,
-                area,
-                row + 1,
-                surface,
-                &format!("   #{}  {} · {status}", session.id, session.shell),
-            );
-        } else {
-            let status = if area.width >= 30 {
-                status
-            } else if running {
-                locale(["Run", "Chạy"], vi)
-            } else {
-                locale(["Exit", "Thoát"], vi)
-            };
-            let details = format!(" {} · {status}", session.shell);
-            let line = &mut frame.rows[usize::from(row)];
-            pad(line, area.x, Tone::Plain);
-            let name_width = area
-                .width
-                .saturating_sub(details.width() as u16)
-                .max(area.width.min(7));
-            let name_end = area.x + name_width;
-            write_span(line, surface, &title, name_end);
-            pad(line, name_end, surface);
-            write_span(line, surface, &details, area.right());
-            pad(line, area.right(), surface);
-        }
-        hits.0.push((
-            Rect {
-                y: row,
-                height,
-                ..area
-            },
-            Hit::Session(session.id),
-        ));
-    }
-    let end =
-        area.y + 1 + (manager.entries.len().saturating_sub(start).min(capacity) as u16) * height;
-    for y in end..area.bottom() {
-        sidebar_line(frame, area, y, SURFACE, "");
+        sidebar_line(
+            frame,
+            area,
+            at + 1,
+            SURFACE,
+            &format!(" #{} · {} · {status}", session.id, session.shell),
+        );
     }
 }
 
@@ -374,26 +533,104 @@ fn footer(frame: &mut Frame, manager: &Manager, state: &State) {
         write_span(footer, tone, &format!(" {note}"), frame.size.0);
         return;
     }
-    footer.push(Tone::Muted, " ");
-    let commands: &[Command] = if frame.size.0 < 80 {
-        &[Command::New, Command::Sidebar, Command::Menu, Command::Back]
+    let hint = if let Some(command) = state.hovered_command {
+        format!(
+            " {} · {}",
+            action_title(command, manager, vi),
+            command.shortcut()
+        )
+    } else if let Some(session) = state.sidebar_hover.and_then(|id| manager.session(id)) {
+        format!(" {} · {} · #{}", session.title(), session.shell, session.id)
+    } else if manager.arrangement.sidebar_focused {
+        locale(
+            [
+                " / Filter  ↑↓ Select  Enter Focus  Esc Back",
+                " / Lọc  ↑↓ Chọn  Enter Tiêu điểm  Esc Quay lại",
+            ],
+            vi,
+        )
+        .into()
+    } else if frame.size.0 >= 80 {
+        locale([" F10 Back   F6/F7", " F10 Quay lại   F6/F7"], vi).into()
     } else {
-        &[
-            Command::Rename,
-            Command::Close,
-            Command::Restart,
-            Command::Back,
-        ]
+        locale([" F10 Back", " F10 Quay lại"], vi).into()
     };
-    for command in commands {
-        let shortcut = format!(" {} {} ", command.shortcut(), command.title(vi));
-        if row_width(footer) as usize + shortcut.width() > usize::from(frame.size.0) {
-            continue;
-        }
-        footer.push(Tone::Muted, &shortcut);
+    write_span(footer, Tone::Muted, &hint, frame.size.0);
+}
+
+fn find_bar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State) {
+    let Some(find) = &state.find else { return };
+    let Some(row) = frame.size.1.checked_sub(1) else {
+        return;
+    };
+    if frame.size.0 < 10 {
+        return;
     }
-    if frame.size.0 >= 80 {
-        write_span(footer, Tone::Muted, "  F6/F7 ", frame.size.0);
+    let compact = frame.size.0 < 28;
+    let text = if compact {
+        " / "
+    } else {
+        locale([" Find ", " Tìm "], state.vi)
+    };
+    let visible_hit = manager
+        .session(find.id)
+        .is_some_and(|s| find.visible(&s.output.lock().unwrap()).is_some());
+    let status = if visible_hit {
+        locale(["Match", "Có kết quả"], state.vi)
+    } else if find.hit.is_some() {
+        locale(["Output changed", "Kết quả đã đổi"], state.vi)
+    } else if find.query.value.is_empty() {
+        ""
+    } else {
+        locale(["No match", "Không thấy"], state.vi)
+    };
+    let width = frame.size.0;
+    let status = if width >= 48 { status } else { "" };
+    let line = &mut frame.rows[row as usize];
+    line.push(Tone::Accent, text);
+    let query_end = if compact {
+        width
+    } else {
+        width.saturating_sub(13 + status.width() as u16)
+    };
+    let (offset, cursor) = input_window(
+        &find.query,
+        query_end.saturating_sub(row_width(line)).saturating_sub(1),
+    );
+    write_span(line, SURFACE, &find.query.value[offset..], query_end);
+    pad(line, query_end, SURFACE);
+    if !status.is_empty() {
+        write_span(line, Tone::Muted, status, width);
+    }
+    for (label, hit) in [
+        (" ↑ ", Hit::FindPrevious),
+        (" ↓ ", Hit::FindNext),
+        (" Esc ", Hit::Cancel),
+    ] {
+        let x = row_width(line);
+        if !compact && x + label.width() as u16 <= width {
+            line.push(SELECTED, label);
+            hits.row(x, row, label.width() as u16, hit);
+        }
+    }
+    frame.cursor = Some(((text.width() as u16 + cursor).min(width - 1), row));
+}
+
+struct OptionRow {
+    title: String,
+    shortcut: &'static str,
+    enabled: bool,
+    step: Option<usize>,
+}
+
+impl OptionRow {
+    fn choice(index: usize, title: String) -> Self {
+        Self {
+            title,
+            shortcut: "",
+            enabled: true,
+            step: Some(index),
+        }
     }
 }
 
@@ -402,22 +639,36 @@ fn dialogue(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State
     let vi = state.vi;
     let (title, origin, options, selected, input, note, confirm) = match modal {
         Modal::Menu { selected, origin } => {
-            let options = menu_commands(manager)
-                .into_iter()
-                .map(|command| {
-                    let title = if command == Command::Split && manager.arrangement.split_active() {
-                        locale(["Unsplit", "Bỏ chia"], vi)
-                    } else {
-                        command.title(vi)
-                    };
-                    (title.to_owned(), command.shortcut())
-                })
-                .collect();
+            let mut options = Vec::new();
+            let mut index = 0;
+            for group in MENU_GROUPS {
+                if !options.is_empty() {
+                    options.push(OptionRow {
+                        title: String::new(),
+                        shortcut: "",
+                        enabled: false,
+                        step: None,
+                    });
+                }
+                for &command in *group {
+                    options.push(OptionRow {
+                        title: action_title(command, manager, vi).into(),
+                        shortcut: command.shortcut(),
+                        enabled: state.enabled(manager, command),
+                        step: Some(index),
+                    });
+                    index += 1;
+                }
+            }
+            let active_row = options
+                .iter()
+                .position(|option| option.step == Some(*selected))
+                .unwrap_or_default();
             (
                 Command::Menu.title(vi).into(),
                 *origin,
                 options,
-                *selected,
+                active_row,
                 None,
                 None,
                 false,
@@ -428,7 +679,8 @@ fn dialogue(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State
                 .catalog
                 .filtered(&query.value)
                 .into_iter()
-                .map(|repo| (repo.name.clone(), ""))
+                .enumerate()
+                .map(|(index, repo)| OptionRow::choice(index, repo.name.clone()))
                 .collect();
             let note = options.is_empty().then(|| {
                 locale(
@@ -458,7 +710,8 @@ fn dialogue(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State
                 .catalog
                 .shells
                 .iter()
-                .map(|shell| ((*shell).to_owned(), ""))
+                .enumerate()
+                .map(|(index, shell)| OptionRow::choice(index, (*shell).to_owned()))
                 .collect();
             let note = options.is_empty().then(|| {
                 locale(
@@ -532,8 +785,15 @@ fn dialogue(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State
     let decorations = 2 + u16::from(input.is_some()) + u16::from(note.is_some());
     let capacity = usize::from(available.saturating_sub(decorations))
         .min(options.len())
-        .min(11);
-    let width = frame.size.0.min(if origin.is_some() { 40 } else { 60 });
+        .min(if matches!(modal, Modal::Menu { .. }) {
+            22
+        } else {
+            11
+        });
+    let width = frame.size.0.min(match modal {
+        Modal::Menu { .. } => 43,
+        _ => 60,
+    });
     let height = (decorations + capacity as u16).min(available);
     let (x, y) = origin.map_or(
         ((frame.size.0 - width) / 2, (frame.size.1 - height) / 2),
@@ -557,7 +817,12 @@ fn dialogue(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State
         let (left, cursor) = input_window(input, interior.saturating_sub(1));
         let mut content = Line::default();
         content.push(SURFACE, " ");
-        write_span(&mut content, SURFACE, &input.value[left..], width);
+        let placeholder = if matches!(modal, Modal::Repositories { .. }) && input.value.is_empty() {
+            locale(["Search local repositories", "Tìm kho mã cục bộ"], vi)
+        } else {
+            &input.value[left..]
+        };
+        write_span(&mut content, SURFACE, placeholder, width);
         if let Some(selection) = input.selection() {
             let start = selection.start.saturating_sub(left) + 1;
             let end = (selection.end.saturating_sub(left) + 1).min(content.contents().len());
@@ -579,20 +844,45 @@ fn dialogue(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State
         row += 1;
     }
     let start = list_start(selected, capacity, options.len());
-    for (index, (option, shortcut)) in options.iter().enumerate().skip(start).take(capacity) {
+    for (index, option) in options.iter().enumerate().skip(start).take(capacity) {
         if row >= y + height - 1 {
             break;
         }
-        let tone = if index == selected { SELECTED } else { SURFACE };
         let mut content = Line::default();
-        content.push(tone, if index == selected { " › " } else { "   " });
-        let boundary = width.saturating_sub(shortcut.width() as u16 + 1);
-        write_span(&mut content, tone, option, boundary);
-        pad(&mut content, boundary, tone);
-        write_span(&mut content, tone, shortcut, width);
-        pad(&mut content, width, tone);
+        if option.step.is_none() {
+            content.push(SURFACE, " ");
+            content.push(BORDER, "─".repeat(width.saturating_sub(2).into()));
+            pad(&mut content, width, SURFACE);
+        } else {
+            let tone = if index == selected && option.enabled {
+                SELECTED
+            } else {
+                SURFACE
+            };
+            content.push(
+                tone,
+                if index == selected && option.enabled {
+                    " › "
+                } else {
+                    "   "
+                },
+            );
+            let boundary = width.saturating_sub(option.shortcut.width() as u16 + 1);
+            let label_tone = if option.enabled { tone } else { Tone::Muted };
+            write_span(
+                &mut content,
+                label_tone,
+                &ellipsize(&option.title, usize::from(boundary.saturating_sub(3))),
+                boundary,
+            );
+            pad(&mut content, boundary, tone);
+            write_span(&mut content, label_tone, option.shortcut, width);
+            pad(&mut content, width, tone);
+            if let Some(step) = option.step.filter(|_| option.enabled) {
+                hits.row(x, row, width, Hit::Step(step));
+            }
+        }
         overlay(frame, x, row, width, &content);
-        hits.row(x, row, width, Hit::Step(index));
         row += 1;
     }
     let row = y + height - 1;

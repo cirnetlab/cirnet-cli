@@ -23,6 +23,7 @@
 - Tighten the Git status and Branch spacing, widen Local path, and remove the path tooltip and horizontal scrolling from the repository table.
 - Remove the F10 Back button from the terminal toolbar and trim the footer shortcuts.
 - Show standard Windows paths in repository reports and open PowerShell in the equivalent Windows directory.
+- Refine the terminal toolbar and session navigator. Add adjustable splits, pane maximization, scrollback search, and visible text selection.
 
 ### Tiếng Việt
 
@@ -45,3 +46,4 @@
 - Thu gọn khoảng cách giữa các cột để mở rộng đường dẫn cục bộ, đồng thời bỏ tooltip đường dẫn và cuộn ngang khỏi bảng quản lý repo.
 - Bỏ nút F10 Back khỏi thanh công cụ Terminal và rút gọn gợi ý phím tắt ở thanh dưới.
 - Hiển thị đường dẫn Windows thông thường trong báo cáo kho mã và mở PowerShell tại thư mục Windows tương đương.
+- Tinh chỉnh thanh công cụ và danh sách phiên. Bổ sung chỉnh tỷ lệ chia, phóng to pane, tìm trong đầu ra đã lưu và chọn văn bản đang hiển thị.

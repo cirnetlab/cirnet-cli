@@ -169,7 +169,8 @@ fn terminal_shows_back_in_footer_and_omits_scroll_hints() {
         let toolbar = frame.rows[0].contents();
         let footer = frame.rows.last().unwrap().contents();
 
-        assert!(toolbar.contains("F5"));
+        assert!(toolbar.contains("Actions"));
+        assert!(!toolbar.contains("F5"));
         assert!(!toolbar.contains("F10"));
         assert!(footer.contains("F10 Back"));
         assert!(!footer.contains("‹/›"));
@@ -196,7 +197,7 @@ fn parsed_output_keeps_unicode_and_ansi_styles_without_host_escape_codes() {
     let mut output = Output::new(pty_size((24, 8)));
     output.parser.process(b"\x1b]52;c;dGVzdA==\x07");
     output.parser.process("\x1b[1;31mViệt 界\x1b[0m".as_bytes());
-    let line = terminal_line(output.parser.screen(), 0, 24);
+    let line = terminal_line(output.parser.screen(), 0, 24, |_| None);
     assert_eq!(line.contents().trim_end(), "Việt 界");
     assert!(!line.contents().contains('\x1b'));
     assert!(matches!(
@@ -513,6 +514,112 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
         hits.at(sidebar.x, sidebar.y + 1),
         Some(render::Hit::Session(original))
     );
+    assert_eq!(
+        hits.at(sidebar.x, sidebar.y + 2),
+        Some(render::Hit::Session(split))
+    );
+    assert!(frame.rows[0].contents().contains("fixture-two"));
+
+    let split_process = witness(manager.session(split).unwrap());
+    let divider = layout.vertical_divider.unwrap();
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), divider),
+        (MouseEventKind::Drag(MouseButton::Left), divider + 9),
+        (MouseEventKind::Up(MouseButton::Left), divider + 9),
+    ] {
+        assert!(!state.mouse(
+            &mut manager,
+            &layout,
+            &hits,
+            MouseEvent {
+                kind,
+                column,
+                row: first.body.y,
+                modifiers: KeyModifiers::NONE,
+            }
+        ));
+    }
+    let resized = Layout::new(size, &manager.arrangement);
+    assert!(resized.pane(original).unwrap().body.width > first.body.width);
+    state.size = (60, 14);
+    let stacked = Layout::new(state.size, &manager.arrangement);
+    let initial_row = stacked.horizontal_divider.unwrap();
+    for _ in 0..4 {
+        let current = Layout::new(state.size, &manager.arrangement);
+        assert!(!state.key(
+            &mut manager,
+            &current,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        ));
+    }
+    assert!(
+        Layout::new(state.size, &manager.arrangement)
+            .horizontal_divider
+            .unwrap()
+            < initial_row
+    );
+    state.size = size;
+    manager.arrangement.set_split_ratio(60);
+    let before_key = manager.arrangement.split_ratio();
+    assert!(!state.key(
+        &mut manager,
+        &resized,
+        KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+    ));
+    let ratio = manager.arrangement.split_ratio();
+    assert!(ratio < before_key);
+    assert!(!state.key(
+        &mut manager,
+        &resized,
+        KeyEvent::new(
+            KeyCode::Char('m'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )
+    ));
+    assert_eq!(
+        Layout::new(size, &manager.arrangement)
+            .panes
+            .iter()
+            .flatten()
+            .count(),
+        1
+    );
+    assert!(!state.key(
+        &mut manager,
+        &resized,
+        KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )
+    ));
+    assert_eq!(manager.arrangement.active(), Some(original));
+    assert!(!state.key(
+        &mut manager,
+        &resized,
+        KeyEvent::new(
+            KeyCode::Char('m'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )
+    ));
+    assert_eq!(manager.arrangement.split_ratio(), ratio);
+    assert_eq!(process_state(&split_process, 0), WAIT_TIMEOUT);
+    assert_eq!(process_state(&original_process, 0), WAIT_TIMEOUT);
+
+    key(&mut state, &mut manager, KeyCode::F(4));
+    key(&mut state, &mut manager, KeyCode::Char('/'));
+    key(&mut state, &mut manager, KeyCode::Char('z'));
+    assert!(state.sidebar_ids(&manager).is_empty());
+    key(&mut state, &mut manager, KeyCode::Esc);
+    assert_eq!(state.sidebar_ids(&manager), [original, split]);
+    key(&mut state, &mut manager, KeyCode::Down);
+    key(&mut state, &mut manager, KeyCode::Enter);
+    assert_eq!(manager.arrangement.active(), Some(split));
+
+    let layout = Layout::new(size, &manager.arrangement);
+    manager.resize_visible(&layout);
+    let first = layout.pane(original).unwrap();
+    let (_, hits) = render::frame(&manager, &layout, &state);
+
     assert!(!state.mouse(
         &mut manager,
         &layout,
@@ -527,6 +634,75 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
     assert_eq!(manager.active().unwrap().id, original);
     send(&mut state, &mut manager, "echo CHECK:[%CNL_SPLIT_CHECK%]");
     output_contains(manager.session(original).unwrap(), "CHECK:[original]");
+    state.command(&mut manager, Control::Find);
+    for ch in "CHECK:[original]".chars() {
+        key(&mut state, &mut manager, KeyCode::Char(ch));
+    }
+    assert!(state.find.as_ref().unwrap().hit.is_some());
+    {
+        let mut output = manager.session(original).unwrap().output.lock().unwrap();
+        output.process(b"\x1b[6n");
+        assert!(state.find.as_ref().unwrap().visible(&output).is_some());
+    }
+    let (frame, _) = render::frame(&manager, &layout, &state);
+    assert!(frame.rows.iter().any(|line| line.has(Tone::Match)));
+    key(&mut state, &mut manager, KeyCode::Esc);
+    assert!(state.find.is_none());
+
+    let target = {
+        let output = manager.session(original).unwrap().output.lock().unwrap();
+        let screen = output.parser.screen();
+        (0..screen.size().0.get())
+            .find(|&row| screen.contents_between(row, 0, row, 16) == "CHECK:[original]")
+            .unwrap()
+    };
+    for (kind, col) in [
+        (MouseEventKind::Down(MouseButton::Left), 0),
+        (MouseEventKind::Drag(MouseButton::Left), 15),
+        (MouseEventKind::Up(MouseButton::Left), 15),
+    ] {
+        assert!(!state.mouse(
+            &mut manager,
+            &layout,
+            &hits,
+            MouseEvent {
+                kind,
+                column: first.body.x + col,
+                row: first.body.y + target,
+                modifiers: KeyModifiers::SHIFT,
+            }
+        ));
+    }
+    let mut output = manager.session(original).unwrap().output.lock().unwrap();
+    output.process(b"\x1b[6n");
+    let marked = state.marked.as_ref().unwrap();
+    assert!(marked.has_range);
+    assert!(marked.valid(original, &output));
+    assert_eq!(
+        marked.cells.text(output.parser.screen()),
+        "CHECK:[original]"
+    );
+    drop(output);
+    #[derive(Default)]
+    struct RecordedClipboard(String);
+    impl crate::tui::clipboard::Clipboard for RecordedClipboard {
+        fn set_text(
+            &mut self,
+            text: &str,
+        ) -> std::result::Result<(), crate::tui::clipboard::ClipboardError> {
+            self.0 = text.to_owned();
+            Ok(())
+        }
+        fn get_text(
+            &mut self,
+        ) -> std::result::Result<String, crate::tui::clipboard::ClipboardError> {
+            Ok(self.0.clone())
+        }
+    }
+    let mut clipboard = RecordedClipboard::default();
+    state.copy_selection(&manager, &mut clipboard);
+    assert_eq!(clipboard.0, "CHECK:[original]");
+    key(&mut state, &mut manager, KeyCode::Esc);
 
     state.command(&mut manager, Control::MovePane);
     state.command(&mut manager, Control::MoveDown);

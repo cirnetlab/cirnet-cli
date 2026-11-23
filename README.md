@@ -28,8 +28,6 @@
 
 ## 1. Cài đặt công cụ
 
-**Hệ điều hành:** Windows x64. Cài các công cụ sau và bảo đảm gọi được từ PowerShell:
-
 | Công cụ | Yêu cầu |
 | --- | --- |
 | [Git](https://git-scm.com/downloads/win) | Clone và quản lý source |
@@ -91,13 +89,15 @@ Giao diện Vue/TypeScript thuộc `cirnet-interface-next`; backend Rust REST/We
 
 | Lệnh | Chức năng |
 | --- | --- |
+| `cargo build --release` | Build chương trình |
+| `cargo run --release` | Chạy chương trình |
+| `cnl build --all` | Build và đóng gói native candidate |
+| `cnl run --desktop interface` | Chạy Browser interface |
 | `cnl tui --lang vi` | Mở TUI bằng tiếng Việt |
 | `cnl repos` | Mở Multi-Repository Manager |
 | `cnl status` | Kiểm tra các dịch vụ |
 | `cnl stop` | Dừng phiên runtime do CLI quản lý |
 | `cnl verify` | Kiểm chứng native candidate |
 | `cnl setup --browser` | Cài Chromium phục vụ Playwright (tùy chọn) |
-
-Khi chạy `cnl` ngoài workspace, chỉ định `--workspace <DIRECTORY>` hoặc biến môi trường `CNL_WORKSPACE`. Giữ cùng workspace và profile giữa các bước build/run.
 
 **Tài liệu:** [Hướng dẫn tiếng Việt](docs/vi/index.md) · [English guide](docs/en/index.md) · [Tham chiếu lệnh VI](docs/vi/commands.md) · [Command reference EN](docs/en/commands.md)

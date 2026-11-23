@@ -2,6 +2,7 @@ mod backend;
 mod input;
 mod layout;
 mod render;
+mod scrollback;
 mod workspace;
 
 use std::{
@@ -39,6 +40,7 @@ pub(super) struct Manager {
     entries: Vec<Session>,
     arrangement: Arrangement,
     next_id: SessionId,
+    recent: Vec<PathBuf>,
 }
 
 impl Manager {
@@ -67,20 +69,54 @@ impl Manager {
                 vi
             )
         );
+        let settings = crate::repositories::registry_directory(workspace, flags)
+            .ok()
+            .map(|dir| dir.join("terminal-display.json"));
+        let previous = settings.as_deref().map(DisplayPreferences::read);
+        if let Some(prefs) = previous {
+            self.arrangement.sidebar = match prefs.sidebar {
+                Some(true) => Sidebar::Visible,
+                Some(false) => Sidebar::Hidden,
+                None => Sidebar::Auto,
+            };
+            self.arrangement.set_split_ratio(prefs.split_ratio);
+        }
         let size = console::size()?;
         let index = self.attach(key, &cwd, shell, pty_size(size), vi)?;
         let id = self.entries[index].id;
         self.arrangement.activate(id);
+        self.remember(id);
         self.arrangement.sidebar_focused = false;
-        if size.0 < 54 {
-            self.arrangement.sidebar = Sidebar::Auto;
-        }
         let catalog = Catalog::new(workspace, flags, rows);
         if let Some(name) = catalog.name_for(&cwd, key) {
             self.entries[index].repository = name.into();
         }
         let mut screen = Screen::enter(io::BufWriter::with_capacity(64 * 1024, io::stdout()))?;
-        workspace::interact(self, &mut screen, size, catalog, vi)
+        let result = workspace::interact(self, &mut screen, size, catalog, vi);
+        drop(screen);
+        result?;
+        let prefs = DisplayPreferences::from(&self.arrangement);
+        if let Some(path) = settings
+            && previous != Some(prefs)
+        {
+            std::fs::create_dir_all(path.parent().expect("terminal settings directory"))?;
+            crate::environment::write_json(&path, &prefs).context(locale(
+                [
+                    "Could not save terminal display settings",
+                    "Không thể lưu thiết lập hiển thị terminal",
+                ],
+                vi,
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn remember(&mut self, id: SessionId) {
+        if let Some(path) = self.session(id).map(|s| s.cwd.clone()) {
+            self.recent.retain(|entry| entry != &path);
+            self.recent.insert(0, path);
+            self.recent.truncate(MAX_SESSIONS);
+        }
     }
 
     fn attach(
@@ -182,6 +218,47 @@ impl Manager {
             .map(|session| session.id);
         self.arrangement.close(id, fallback);
         Some(session)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+struct DisplayPreferences {
+    sidebar: Option<bool>,
+    split_ratio: u16,
+}
+
+impl Default for DisplayPreferences {
+    fn default() -> Self {
+        Self {
+            sidebar: None,
+            split_ratio: 50,
+        }
+    }
+}
+
+impl DisplayPreferences {
+    fn read(path: &Path) -> Self {
+        if !std::fs::symlink_metadata(path).is_ok_and(|info| info.is_file() && info.len() < 1024) {
+            return Self::default();
+        }
+        std::fs::read(path)
+            .ok()
+            .and_then(|contents| serde_json::from_slice(&contents).ok())
+            .unwrap_or_default()
+    }
+}
+
+impl From<&Arrangement> for DisplayPreferences {
+    fn from(arrangement: &Arrangement) -> Self {
+        Self {
+            sidebar: match arrangement.sidebar {
+                Sidebar::Auto => None,
+                Sidebar::Visible => Some(true),
+                Sidebar::Hidden => Some(false),
+            },
+            split_ratio: arrangement.split_ratio(),
+        }
     }
 }
 
@@ -322,14 +399,21 @@ impl Session {
             .is_none_or(|exit| exit.is_err())
     }
 
-    fn mouse(&self, mouse: MouseEvent, origin: (u16, u16)) -> Option<bool> {
+    fn mouse(&self, mut mouse: MouseEvent, area: layout::Rect, captured: bool) -> Option<bool> {
         let packet = {
             let output = self.output.lock().unwrap();
             let screen = output.parser.screen();
-            if output.exit.is_some() || screen.scrollback() != 0 {
+            if output.exit.is_some() || (!captured && screen.scrollback() != 0) {
                 return None;
             }
-            mouse_bytes(mouse, screen, origin)?
+            if captured {
+                let (rows, columns) = screen.size();
+                let width = area.width.min(columns.get()).max(1);
+                let height = area.height.min(rows.get()).max(1);
+                mouse.column = mouse.column.clamp(area.x, area.x + width - 1);
+                mouse.row = mouse.row.clamp(area.y, area.y + height - 1);
+            }
+            mouse_bytes(mouse, screen, (area.x, area.y))?
         };
         Some(self.send(packet))
     }
@@ -356,6 +440,7 @@ struct Output {
     exit: Option<std::result::Result<ExitStatus, String>>,
     input_failed: bool,
     resize_failed: bool,
+    generation: u64,
 }
 
 impl Output {
@@ -372,6 +457,7 @@ impl Output {
             exit: None,
             input_failed: false,
             resize_failed: false,
+            generation: 0,
         }
     }
 
@@ -383,6 +469,7 @@ impl Output {
 
     fn process(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
         self.parser.process(bytes);
+        self.generation = self.generation.wrapping_add(1);
         self.changed();
         std::mem::take(&mut self.parser.callbacks_mut().0)
     }
@@ -390,6 +477,7 @@ impl Output {
     fn resize(&mut self, size: PtySize, failed: bool) {
         let (rows, columns) = dimensions(size);
         self.parser.set_size(rows, columns);
+        self.generation = self.generation.wrapping_add(1);
         self.resize_failed = failed;
         self.changed();
     }
@@ -432,7 +520,12 @@ impl vt100::Callbacks for Replies {
     }
 }
 
-fn terminal_line(screen: &vt100::Screen, row: u16, columns: u16) -> Line {
+fn terminal_line(
+    screen: &vt100::Screen,
+    row: u16,
+    columns: u16,
+    highlight: impl Fn(u16) -> Option<Tone>,
+) -> Line {
     let mut line = Line::default();
     for index in 0..columns {
         let Some(cell) = screen.cell(row, index) else {
@@ -469,7 +562,7 @@ fn terminal_line(screen: &vt100::Screen, row: u16, columns: u16) -> Line {
                 attributes,
             }
         };
-        line.push(tone, content);
+        line.push(highlight(index).unwrap_or(tone), content);
     }
     line
 }

@@ -108,7 +108,13 @@ The dashboard shows the branch, Git status, local path and short commit hash. Op
 
 Press `:` to open the shared CNL command field. It uses the same history, completion and output controls as the main terminal. Press `T` to open the focused repository terminal.
 
-In the terminal workspace, press F1 for a new session, F2 to rename its label, F3 to split or unsplit, F4 for the session list, and F5 for actions including Move and Duplicate. F6 and F7 switch sessions. F8 closes the selected session, F9 restarts it, and F10 returns to the dashboard. A session keeps its state when you return to the dashboard. Duplicate starts a fresh shell in the same initial directory.
+Use the integrated terminal toolbar or press F1 to open a terminal. The picker searches local repositories, prioritizes recent choices during the current CNL process, and offers installed shells. The Sessions panel shows one row per session. Press F4 to focus or hide it, then / to filter, ↑ or ↓ to navigate, and Enter to focus a session. F6 and F7 switch sessions immediately.
+
+F3 splits or restores a single pane. Drag the divider or use Ctrl+Shift+Left and Ctrl+Shift+Right to change the first pane's share. Ctrl+Shift+P focuses the other pane and Ctrl+Shift+M maximizes or restores the current pane. The profile remembers sidebar visibility and split ratio.
+
+Open **Actions** with F5, from a pane header, or by right-clicking a session. The menu lists available operations and shortcuts, including Rename, Duplicate, Move, Restart, and Close. F10 returns to Repository Manager with the sessions still open. Duplicate starts a fresh shell in the same initial directory.
+
+Ctrl+Shift+F searches retained output in the focused pane. Enter or F3 moves to the next result, Shift+Enter or Shift+F3 moves to the previous result, and Esc returns to the shell. Drag to select visible text. Use Shift+drag if the application uses mouse tracking. Copy with Ctrl+Shift+C or **Copy selection** in Actions. Ctrl+C remains the shell interrupt. Search uses the scrollback retained by the terminal parser at the current pane width.
 
 ### Runtime options for `run` and `dev`
 

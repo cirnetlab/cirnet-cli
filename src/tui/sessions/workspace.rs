@@ -18,14 +18,16 @@ use crossterm::event::{
 
 use super::{
     super::{
+        clipboard::{Clipboard, SystemClipboard},
         editor::Input,
         terminal::{Painter, Screen, color_enabled},
     },
     Manager, Result, Row, Session, SessionId, Workspace,
     backend::MAX_PASTE,
-    layout::{Layout, Sidebar},
+    layout::{Layout, Rect, Sidebar},
     locale, pty_size,
     render::{self, Hit, Hits},
+    scrollback::{self, Match, Selection},
 };
 
 const EDIT_LIMIT: usize = 192;
@@ -178,6 +180,12 @@ pub(super) enum Command {
     MoveDown,
     Close,
     Restart,
+    FocusPane,
+    Maximize,
+    ResizeLess,
+    ResizeMore,
+    Find,
+    Copy,
     Back,
 }
 
@@ -198,6 +206,12 @@ impl Command {
                 Self::MoveDown => ["Move down in list", "Đưa xuống trong danh sách"],
                 Self::Close => ["Close", "Đóng"],
                 Self::Restart => ["Restart", "Khởi động lại"],
+                Self::FocusPane => ["Focus other pane", "Chuyển tiêu điểm ô"],
+                Self::Maximize => ["Maximize pane", "Phóng to ô"],
+                Self::ResizeLess => ["Shrink first pane", "Thu nhỏ ô đầu"],
+                Self::ResizeMore => ["Grow first pane", "Mở rộng ô đầu"],
+                Self::Find => ["Find in terminal", "Tìm trong terminal"],
+                Self::Copy => ["Copy selection", "Sao chép vùng chọn"],
                 Self::Back => ["Back", "Quay lại"],
             },
             vi,
@@ -216,6 +230,12 @@ impl Command {
             Self::Close => "F8",
             Self::Restart => "F9",
             Self::Back => "F10",
+            Self::FocusPane => "Ctrl+Shift+P",
+            Self::Maximize => "Ctrl+Shift+M",
+            Self::ResizeLess => "Ctrl+Shift+←",
+            Self::ResizeMore => "Ctrl+Shift+→",
+            Self::Find => "Ctrl+Shift+F",
+            Self::Copy => "Ctrl+Shift+C",
             Self::MoveUp => "Ctrl+Shift+↑",
             Self::MoveDown => "Ctrl+Shift+↓",
             Self::MovePane | Self::Duplicate => "",
@@ -227,6 +247,12 @@ impl Command {
             return match key.code {
                 KeyCode::Up => Some(Self::MoveUp),
                 KeyCode::Down => Some(Self::MoveDown),
+                KeyCode::Left => Some(Self::ResizeLess),
+                KeyCode::Right => Some(Self::ResizeMore),
+                KeyCode::Char('p' | 'P') => Some(Self::FocusPane),
+                KeyCode::Char('m' | 'M') => Some(Self::Maximize),
+                KeyCode::Char('f' | 'F') => Some(Self::Find),
+                KeyCode::Char('c' | 'C') => Some(Self::Copy),
                 _ => None,
             };
         }
@@ -249,25 +275,80 @@ impl Command {
     }
 }
 
-pub(super) fn menu_commands(manager: &Manager) -> Vec<Command> {
-    let mut commands = vec![Command::New];
-    if let Some(session) = manager.active() {
-        commands.push(Command::Split);
-        if manager.arrangement.split_active() {
-            commands.push(Command::MovePane);
-        }
-        commands.extend([Command::Rename, Command::Duplicate]);
-        let current = manager.position(session.id).unwrap();
-        if current > 0 {
-            commands.push(Command::MoveUp);
-        }
-        if current + 1 < manager.entries.len() {
-            commands.push(Command::MoveDown);
-        }
-        commands.extend([Command::Restart, Command::Close]);
+pub(super) const MENU_GROUPS: &[&[Command]] = &[
+    &[
+        Command::New,
+        Command::Duplicate,
+        Command::Rename,
+        Command::Restart,
+        Command::Close,
+    ],
+    &[
+        Command::Split,
+        Command::MovePane,
+        Command::FocusPane,
+        Command::Maximize,
+        Command::ResizeLess,
+        Command::ResizeMore,
+    ],
+    &[
+        Command::Sidebar,
+        Command::Previous,
+        Command::Next,
+        Command::MoveUp,
+        Command::MoveDown,
+    ],
+    &[Command::Find, Command::Copy, Command::Back],
+];
+
+fn menu_commands() -> impl Iterator<Item = Command> {
+    MENU_GROUPS.iter().flat_map(|group| group.iter().copied())
+}
+
+pub(super) struct FindBar {
+    pub(super) id: SessionId,
+    pub(super) query: Input,
+    pub(super) hit: Option<Match>,
+    generation: u64,
+    columns: u16,
+    excerpt: Option<String>,
+}
+
+impl FindBar {
+    pub(super) fn visible(&self, output: &super::Output) -> Option<Match> {
+        let hit = self.hit?;
+        let screen = output.parser.screen();
+        (self.generation == output.generation
+            || self.columns == screen.size().1.get()
+                && self
+                    .excerpt
+                    .as_ref()
+                    .is_some_and(|text| hit.visible_text(screen).as_ref() == Some(text)))
+        .then_some(hit)
     }
-    commands.push(Command::Back);
-    commands
+}
+
+pub(super) struct Marked {
+    pub(super) id: SessionId,
+    pub(super) cells: Selection,
+    generation: u64,
+    offset: usize,
+    size: (u16, u16),
+    snapshot: String,
+    anchor: (u16, u16),
+    pub(super) has_range: bool,
+    dragging: bool,
+}
+
+impl Marked {
+    pub(super) fn valid(&self, id: SessionId, output: &super::Output) -> bool {
+        let screen = output.parser.screen();
+        let (rows, cols) = screen.size();
+        self.id == id
+            && self.offset == screen.scrollback()
+            && self.size == (rows.get(), cols.get())
+            && (self.generation == output.generation || self.snapshot == screen.contents())
+    }
 }
 
 pub(super) enum Modal {
@@ -326,6 +407,21 @@ pub(super) enum Completed {
     Closed,
 }
 
+#[derive(Clone, Copy)]
+struct MouseCapture {
+    id: SessionId,
+    area: Rect,
+    event: MouseEvent,
+}
+
+fn button_index(button: MouseButton) -> usize {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Right => 1,
+        MouseButton::Middle => 2,
+    }
+}
+
 pub(super) struct State {
     pub(super) modal: Option<Modal>,
     pub(super) busy: Option<Busy>,
@@ -333,6 +429,14 @@ pub(super) struct State {
     pub(super) catalog: Catalog,
     pub(super) size: (u16, u16),
     pub(super) vi: bool,
+    pub(super) find: Option<FindBar>,
+    pub(super) marked: Option<Marked>,
+    pub(super) sidebar_query: Option<Input>,
+    pub(super) sidebar_selected: Option<SessionId>,
+    pub(super) sidebar_hover: Option<SessionId>,
+    pub(super) hovered_command: Option<Command>,
+    divider_drag: bool,
+    native_mouse: [Option<MouseCapture>; 3],
     events: SyncSender<WorkspaceEvent>,
 }
 
@@ -350,6 +454,14 @@ impl State {
             size,
             catalog,
             vi,
+            find: None,
+            marked: None,
+            sidebar_query: None,
+            sidebar_selected: None,
+            sidebar_hover: None,
+            hovered_command: None,
+            divider_drag: false,
+            native_mouse: [None; 3],
             events,
         }
     }
@@ -380,6 +492,12 @@ impl State {
                 });
             }
             Ok(Completed::Session(session, placement)) => {
+                self.release_mouse(manager);
+                self.find = None;
+                self.marked = None;
+                self.sidebar_query = None;
+                self.sidebar_selected = None;
+                self.sidebar_hover = None;
                 let mut session = *session;
                 session.watch(Some(&self.events));
                 match placement {
@@ -400,8 +518,8 @@ impl State {
                     }
                 }
                 manager.arrangement.sidebar_focused = false;
-                if self.size.0 < 54 {
-                    manager.arrangement.sidebar = Sidebar::Auto;
+                if let Some(id) = manager.arrangement.active() {
+                    manager.remember(id);
                 }
             }
             Ok(Completed::Closed) => {}
@@ -433,6 +551,7 @@ impl State {
                 preferred: Some(session.shell.clone()),
             })
             .collect();
+        let recent = manager.recent.clone();
         self.begin(Busy::Catalog, move || {
             let mut choices = match choices {
                 Some(choices) => choices,
@@ -441,7 +560,15 @@ impl State {
             let mut paths: HashSet<_> = choices.iter().map(|choice| choice.path.clone()).collect();
             existing.retain(|entry| paths.insert(entry.path.clone()));
             choices.extend(existing);
-            choices.sort_by_cached_key(|choice| choice.name.to_lowercase());
+            choices.sort_by_cached_key(|choice| {
+                (
+                    recent
+                        .iter()
+                        .position(|path| path == &choice.path)
+                        .unwrap_or(usize::MAX),
+                    choice.name.to_lowercase(),
+                )
+            });
             Ok(Completed::Picker(choices, installed_shells()))
         });
     }
@@ -534,21 +661,41 @@ impl State {
         }
     }
 
+    pub(super) fn enabled(&self, manager: &Manager, command: Command) -> bool {
+        let active = manager.active();
+        let split = manager.arrangement.split_active();
+        let capacity = manager.entries.len() < super::MAX_SESSIONS;
+        let idle = self.busy.is_none();
+        match command {
+            Command::New => idle && capacity,
+            Command::Split => idle && (split || active.is_some() && capacity),
+            Command::Duplicate => idle && active.is_some() && capacity,
+            Command::Rename | Command::Close | Command::Restart => idle && active.is_some(),
+            Command::FocusPane | Command::MovePane | Command::Maximize => split,
+            Command::ResizeLess | Command::ResizeMore => {
+                split && !manager.arrangement.is_maximized()
+            }
+            Command::MoveUp => active
+                .and_then(|s| manager.position(s.id))
+                .is_some_and(|i| i > 0),
+            Command::MoveDown => active
+                .and_then(|s| manager.position(s.id))
+                .is_some_and(|i| i + 1 < manager.entries.len()),
+            Command::Previous | Command::Next => manager.entries.len() > 1,
+            Command::Find => active.is_some(),
+            Command::Copy => active.zip(self.marked.as_ref()).is_some_and(|(s, mark)| {
+                mark.has_range && mark.valid(s.id, &s.output.lock().unwrap())
+            }),
+            Command::Back => idle,
+            Command::Sidebar | Command::Menu => true,
+        }
+    }
+
     pub(super) fn command(&mut self, manager: &mut Manager, command: Command) -> bool {
-        let id = manager.arrangement.active();
-        if self.busy.is_some()
-            && matches!(
-                command,
-                Command::Back
-                    | Command::New
-                    | Command::Split
-                    | Command::Duplicate
-                    | Command::Close
-                    | Command::Restart
-            )
-        {
+        if !self.enabled(manager, command) {
             return false;
         }
+        let id = manager.arrangement.active();
         self.notice = None;
         match command {
             Command::Back => return true,
@@ -558,19 +705,22 @@ impl State {
                 if arrangement.sidebar_focused {
                     arrangement.sidebar = Sidebar::Hidden;
                     arrangement.sidebar_focused = false;
+                    self.sidebar_query = None;
+                    self.sidebar_selected = None;
                 } else {
                     arrangement.sidebar = Sidebar::Visible;
                     arrangement.sidebar_focused = true;
+                    self.sidebar_selected = arrangement.active();
                 }
             }
-            Command::Menu => {
-                self.modal = Some(Modal::Menu {
-                    selected: 0,
-                    origin: None,
-                });
+            Command::Menu => self.open_menu(manager, None),
+            Command::Previous | Command::Next => {
+                manager.cycle(if command == Command::Previous { -1 } else { 1 });
+                if let Some(id) = manager.arrangement.active() {
+                    manager.remember(id);
+                    self.sidebar_selected = Some(id);
+                }
             }
-            Command::Previous => manager.cycle(-1),
-            Command::Next => manager.cycle(1),
             Command::Split if manager.arrangement.split_active() => manager.arrangement.unsplit(),
             Command::Split | Command::Duplicate if self.capacity(manager) => {
                 if let Some(id) = id {
@@ -583,6 +733,27 @@ impl State {
                 }
             }
             Command::MovePane => manager.arrangement.move_pane(),
+            Command::FocusPane => {
+                manager.arrangement.focus_other();
+                manager.arrangement.sidebar_focused = false;
+            }
+            Command::Maximize => manager.arrangement.toggle_maximized(),
+            Command::ResizeLess => manager.arrangement.adjust_split(-5),
+            Command::ResizeMore => manager.arrangement.adjust_split(5),
+            Command::Find => {
+                if let Some(id) = id {
+                    self.focus_session(manager, id);
+                    self.find = Some(FindBar {
+                        id,
+                        query: Input::default(),
+                        hit: None,
+                        generation: 0,
+                        columns: 0,
+                        excerpt: None,
+                    });
+                }
+            }
+            Command::Copy => self.copy_selection(manager, &mut SystemClipboard),
             Command::MoveUp | Command::MoveDown => {
                 if let Some(id) = id {
                     manager.reorder(id, if command == Command::MoveUp { -1 } else { 1 });
@@ -613,31 +784,37 @@ impl State {
         if key.kind == KeyEventKind::Release {
             return false;
         }
+        if layout.sidebar.is_none() {
+            manager.arrangement.sidebar_focused = false;
+            self.sidebar_query = None;
+            self.sidebar_selected = None;
+        }
         if self.modal.is_some() {
             return self.modal_key(manager, key);
         }
+        if self.find.is_some() {
+            self.key_find(manager, key);
+            return false;
+        }
         if let Some(command) = Command::from_key(key) {
+            if command == Command::Menu {
+                let origin = layout.sidebar.map(|area| (area.x, area.y + 1));
+                self.open_menu(manager, origin);
+                return false;
+            }
             return self.command(manager, command);
         }
         self.notice = None;
         if manager.arrangement.sidebar_focused {
-            match key.code {
-                KeyCode::Esc => {
-                    manager.arrangement.sidebar_focused = false;
-                    if self.size.0 < 54 {
-                        manager.arrangement.sidebar = Sidebar::Auto;
-                    }
-                }
-                KeyCode::Up => manager.cycle(-1),
-                KeyCode::Down => manager.cycle(1),
-                KeyCode::Enter => {
-                    manager.arrangement.sidebar_focused = false;
-                    if self.size.0 < 54 {
-                        manager.arrangement.sidebar = Sidebar::Auto;
-                    }
-                }
-                _ => {}
-            }
+            self.key_sidebar(manager, key);
+            return false;
+        }
+        let marked = self.marked.take();
+        if key.code == KeyCode::Esc
+            && let Some((mark, session)) = marked.zip(manager.active())
+            && mark.has_range
+            && mark.valid(session.id, &session.output.lock().unwrap())
+        {
             return false;
         }
         if let Some(session) = manager.active()
@@ -680,7 +857,13 @@ impl State {
                 return self.accept(manager, None);
             }
             (Modal::Menu { selected, .. }, KeyCode::Up | KeyCode::Down) => {
-                shift_index(selected, key.code, menu_commands(manager).len());
+                let commands: Vec<_> = menu_commands().collect();
+                for _ in &commands {
+                    shift_index(selected, key.code, commands.len());
+                    if self.enabled(manager, commands[*selected]) {
+                        break;
+                    }
+                }
             }
             (Modal::Repositories { query, selected }, KeyCode::Up | KeyCode::Down) => {
                 shift_index(
@@ -708,10 +891,13 @@ impl State {
 
     fn accept(&mut self, manager: &mut Manager, index: Option<usize>) -> bool {
         match self.modal.take() {
-            Some(Modal::Menu { selected, .. }) => {
-                if let Some(command) = menu_commands(manager).get(index.unwrap_or(selected)) {
-                    return self.command(manager, *command);
+            Some(Modal::Menu { selected, origin }) => {
+                if let Some(command) = menu_commands().nth(index.unwrap_or(selected))
+                    && self.enabled(manager, command)
+                {
+                    return self.command(manager, command);
                 }
+                self.modal = Some(Modal::Menu { selected, origin });
             }
             Some(Modal::Repositories { query, selected }) => {
                 let previous = index.unwrap_or(selected);
@@ -762,6 +948,21 @@ impl State {
     }
 
     pub(super) fn paste(&mut self, manager: &Manager, layout: &Layout, value: String) {
+        if let Some(find) = &mut self.find {
+            if find.query.paste_sanitized(&value, EDIT_LIMIT) == Ok(true) {
+                self.search_terminal(manager, false, false);
+            }
+            return;
+        }
+        if manager.arrangement.sidebar_focused && self.modal.is_none() {
+            if let Some(query) = &mut self.sidebar_query
+                && query.paste_sanitized(&value, EDIT_LIMIT) == Ok(true)
+            {
+                self.sidebar_selected = self.sidebar_ids(manager).first().copied();
+            }
+            return;
+        }
+        self.marked = None;
         match &mut self.modal {
             Some(Modal::Rename(_, input)) => {
                 let _ = input.paste_sanitized(&value, EDIT_LIMIT);
@@ -804,10 +1005,34 @@ impl State {
         mouse: MouseEvent,
     ) -> bool {
         use MouseButton::{Left, Right};
-        use MouseEventKind::{Down, ScrollDown, ScrollUp};
+        use MouseEventKind::{Down, Drag, Moved, ScrollDown, ScrollUp, Up};
 
         let (x, y) = (mouse.column, mouse.row);
         let hit = hits.at(x, y);
+        if mouse.kind == Down(Left) {
+            self.divider_drag = false;
+            if let Some(mark) = &mut self.marked {
+                mark.dragging = false;
+            }
+        }
+        if let Drag(button) | Up(button) = mouse.kind
+            && let Some(capture) = self.native_mouse[button_index(button)].as_mut()
+        {
+            if let Some(pane) = layout.pane(capture.id) {
+                capture.area = pane.body;
+            }
+            capture.event = mouse;
+            let sent = manager
+                .session(capture.id)
+                .and_then(|session| session.mouse(mouse, capture.area, true));
+            if matches!(mouse.kind, Up(_)) {
+                self.native_mouse[button_index(button)] = None;
+            }
+            if sent == Some(false) {
+                self.input_failed();
+            }
+            return false;
+        }
         if self.modal.is_some() {
             if matches!(mouse.kind, Down(Left)) {
                 match hit {
@@ -821,6 +1046,11 @@ impl State {
                     _ => {}
                 }
             }
+            if let (Moved, Some(Hit::Step(index)), Some(Modal::Menu { selected, .. })) =
+                (mouse.kind, hit, &mut self.modal)
+            {
+                *selected = index;
+            }
             if matches!(mouse.kind, ScrollUp | ScrollDown) {
                 let code = if mouse.kind == ScrollUp {
                     KeyCode::Up
@@ -831,25 +1061,88 @@ impl State {
             }
             return false;
         }
-
+        if self.find.is_some() {
+            if mouse.kind == Down(Left) {
+                match hit {
+                    Some(Hit::FindNext) => self.search_terminal(manager, false, true),
+                    Some(Hit::FindPrevious) => self.search_terminal(manager, true, true),
+                    Some(Hit::Cancel) => self.find = None,
+                    _ => {}
+                }
+            }
+            return false;
+        }
+        if self.divider_drag && matches!(mouse.kind, Drag(Left) | Up(Left)) {
+            if let Some(ratio) = layout.ratio_at(x, y) {
+                manager.arrangement.set_split_ratio(ratio);
+            }
+            self.divider_drag = mouse.kind != Up(Left);
+            return false;
+        }
+        if matches!(mouse.kind, Drag(Left) | Up(Left))
+            && let Some(marked) = &mut self.marked
+            && marked.dragging
+            && let Some(pane) = layout.pane(marked.id)
+            && let Some(session) = manager.session(marked.id)
+        {
+            let output = session.output.lock().unwrap();
+            if marked.valid(session.id, &output) && pane.body.width > 0 && pane.body.height > 0 {
+                let row = y.clamp(pane.body.y, pane.body.bottom() - 1) - pane.body.y;
+                let col = x.clamp(pane.body.x, pane.body.right() - 1) - pane.body.x;
+                marked.cells.extend(output.parser.screen(), row, col);
+                marked.has_range = (row, col) != marked.anchor;
+            }
+            marked.dragging = mouse.kind != Up(Left);
+            return false;
+        }
+        if matches!(mouse.kind, Drag(_) | Up(_)) {
+            return false;
+        }
+        if mouse.kind == Down(Left) && layout.divider_at(x, y) {
+            self.divider_drag = true;
+            self.marked = None;
+            return false;
+        }
+        if mouse.kind == Moved {
+            self.sidebar_hover = match hit {
+                Some(Hit::Session(id)) => Some(id),
+                _ => None,
+            };
+            self.hovered_command = match hit {
+                Some(Hit::Command(cmd)) => Some(cmd),
+                _ => None,
+            };
+        }
         match (hit, mouse.kind) {
+            (Some(Hit::Command(Command::Menu)), Down(Left)) => {
+                self.open_menu(manager, Some((x, y.saturating_add(1))));
+                return false;
+            }
             (Some(Hit::Command(command)), Down(Left)) => return self.command(manager, command),
+            (Some(Hit::SidebarSearch), Down(Left)) => {
+                manager.arrangement.sidebar_focused = true;
+                self.sidebar_query.get_or_insert_with(Input::default);
+                self.sidebar_selected = manager.arrangement.active();
+                return false;
+            }
             (Some(Hit::Session(id)), Down(Left | Right)) => {
+                self.focus_session(manager, id);
+                if mouse.kind == Down(Right) {
+                    self.open_menu(manager, Some((x, y.saturating_add(1))));
+                }
+                return false;
+            }
+            (Some(Hit::PaneActions(id)), Down(Left | Right)) => {
                 manager.arrangement.activate(id);
                 manager.arrangement.sidebar_focused = false;
-                if self.size.0 < 54 {
-                    manager.arrangement.sidebar = Sidebar::Auto;
-                }
-                if mouse.kind == Down(Right) {
-                    self.context_at(x, y);
-                }
+                self.open_menu(manager, Some((x, y.saturating_add(1))));
                 return false;
             }
             _ => {}
         }
         if layout.sidebar.is_some_and(|area| area.contains(x, y)) {
             if matches!(mouse.kind, ScrollUp | ScrollDown) {
-                manager.cycle(if mouse.kind == ScrollUp { -1 } else { 1 });
+                self.step_sidebar(manager, if mouse.kind == ScrollUp { -1 } else { 1 });
             }
             return false;
         }
@@ -859,43 +1152,244 @@ impl State {
             .flatten()
             .find(|pane| pane.contains(x, y))
         else {
+            if mouse.kind == Down(Left) {
+                self.marked = None;
+            }
             return false;
         };
         let on_header = !pane.body.contains(x, y);
         let changing_focus =
             manager.arrangement.active() != Some(pane.id) || manager.arrangement.sidebar_focused;
+        let point = (x.saturating_sub(pane.body.x), y.saturating_sub(pane.body.y));
         if matches!(mouse.kind, Down(Left | Right)) {
-            manager.arrangement.activate(pane.id);
-            manager.arrangement.sidebar_focused = false;
+            if changing_focus {
+                self.focus_session(manager, pane.id);
+            }
             if mouse.kind == Down(Right) && (on_header || changing_focus) {
-                self.context_at(x, y);
+                self.open_menu(manager, Some((x, y.saturating_add(1))));
                 return false;
             }
         }
-        if changing_focus || on_header {
+        if on_header {
             return false;
         }
         let Some(session) = manager.session(pane.id) else {
             return false;
         };
-        match session.mouse(mouse, (pane.body.x, pane.body.y)) {
+        // Native applications get mouse events when mouse tracking is enabled.
+        // Shift+drag explicitly selects terminal text instead.
+        let native = if !changing_focus && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+            session.mouse(mouse, pane.body, false)
+        } else {
+            None
+        };
+        match native {
             Some(false) => self.input_failed(),
-            Some(true) => {}
+            Some(true) => {
+                self.marked = None;
+                if let Down(button) = mouse.kind {
+                    self.native_mouse[button_index(button)] = Some(MouseCapture {
+                        id: pane.id,
+                        area: pane.body,
+                        event: mouse,
+                    });
+                }
+            }
             None => match mouse.kind {
-                Down(Right) => self.context_at(x, y),
-                ScrollUp => session.scroll(3),
-                ScrollDown => session.scroll(-3),
+                Down(Left) => {
+                    let output = session.output.lock().unwrap();
+                    let screen = output.parser.screen();
+                    let (rows, cols) = screen.size();
+                    self.marked = Some(Marked {
+                        id: pane.id,
+                        cells: Selection::new(screen, point.1, point.0),
+                        generation: output.generation,
+                        offset: screen.scrollback(),
+                        size: (rows.get(), cols.get()),
+                        snapshot: screen.contents(),
+                        anchor: (point.1, point.0),
+                        has_range: false,
+                        dragging: true,
+                    });
+                }
+                Down(Right) => self.open_menu(manager, Some((x, y.saturating_add(1)))),
+                ScrollUp | ScrollDown => {
+                    self.marked = None;
+                    session.scroll(if mouse.kind == ScrollUp { 3 } else { -3 });
+                }
                 _ => {}
             },
         }
         false
     }
 
-    fn context_at(&mut self, x: u16, y: u16) {
+    fn release_mouse(&mut self, manager: &Manager) {
+        for (index, capture) in self.native_mouse.iter_mut().enumerate() {
+            let Some(mut capture) = capture.take() else {
+                continue;
+            };
+            let button = [MouseButton::Left, MouseButton::Right, MouseButton::Middle][index];
+            capture.event.kind = MouseEventKind::Up(button);
+            if let Some(session) = manager.session(capture.id) {
+                session.mouse(capture.event, capture.area, true);
+            }
+        }
+    }
+
+    fn open_menu(&mut self, manager: &Manager, origin: Option<(u16, u16)>) {
         self.modal = Some(Modal::Menu {
-            selected: 0,
-            origin: Some((x, y)),
+            selected: menu_commands()
+                .position(|command| self.enabled(manager, command))
+                .unwrap_or_default(),
+            origin,
         });
+    }
+
+    pub(super) fn sidebar_ids(&self, manager: &Manager) -> Vec<SessionId> {
+        let query = self
+            .sidebar_query
+            .as_ref()
+            .map(|query| query.value.to_lowercase());
+        manager
+            .entries
+            .iter()
+            .filter(|s| {
+                query.as_ref().is_none_or(|q| {
+                    s.title().to_lowercase().contains(q)
+                        || s.repository.to_lowercase().contains(q)
+                        || s.shell.contains(q)
+                })
+            })
+            .map(|s| s.id)
+            .collect()
+    }
+
+    fn step_sidebar(&mut self, manager: &Manager, step: isize) {
+        let ids = self.sidebar_ids(manager);
+        let current = self
+            .sidebar_selected
+            .or(manager.arrangement.active())
+            .and_then(|id| ids.iter().position(|entry| *entry == id))
+            .unwrap_or_default();
+        self.sidebar_selected = ids
+            .get(
+                current
+                    .saturating_add_signed(step)
+                    .min(ids.len().saturating_sub(1)),
+            )
+            .copied();
+    }
+
+    fn focus_session(&mut self, manager: &mut Manager, id: SessionId) {
+        manager.arrangement.activate(id);
+        manager.remember(id);
+        manager.arrangement.sidebar_focused = false;
+        self.sidebar_selected = None;
+        self.sidebar_query = None;
+        self.marked = None;
+    }
+
+    fn key_sidebar(&mut self, manager: &mut Manager, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc if self.sidebar_query.take().is_some() => {
+                self.sidebar_selected = manager.arrangement.active();
+            }
+            KeyCode::Esc => {
+                manager.arrangement.sidebar_focused = false;
+                self.sidebar_selected = None;
+            }
+            KeyCode::Up => self.step_sidebar(manager, -1),
+            KeyCode::Down => self.step_sidebar(manager, 1),
+            KeyCode::PageUp => self.step_sidebar(manager, -5),
+            KeyCode::PageDown => self.step_sidebar(manager, 5),
+            KeyCode::Enter => {
+                if let Some(id) = self
+                    .sidebar_selected
+                    .or(manager.arrangement.active())
+                    .filter(|id| self.sidebar_ids(manager).contains(id))
+                {
+                    self.focus_session(manager, id);
+                }
+            }
+            KeyCode::Char('/') if self.sidebar_query.is_none() => {
+                self.sidebar_query = Some(Input::default())
+            }
+            _ => {
+                if let Some(query) = &mut self.sidebar_query
+                    && query.edit(key, EDIT_LIMIT)
+                {
+                    self.sidebar_selected = self.sidebar_ids(manager).first().copied();
+                }
+            }
+        }
+    }
+
+    fn key_find(&mut self, manager: &Manager, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.find = None,
+            KeyCode::Enter | KeyCode::F(3) => {
+                self.search_terminal(manager, key.modifiers.contains(KeyModifiers::SHIFT), true)
+            }
+            _ => {
+                if self
+                    .find
+                    .as_mut()
+                    .is_some_and(|find| find.query.edit(key, EDIT_LIMIT))
+                {
+                    self.search_terminal(manager, false, false);
+                }
+            }
+        }
+    }
+
+    fn search_terminal(&mut self, manager: &Manager, reverse: bool, advance: bool) {
+        let Some(find) = &mut self.find else { return };
+        let Some(session) = manager.session(find.id) else {
+            return;
+        };
+        let mut output = session.output.lock().unwrap();
+        find.generation = output.generation;
+        let screen = output.parser.screen_mut();
+        let columns = screen.size().1.get();
+        let previous = if advance && columns == find.columns {
+            find.hit
+        } else {
+            None
+        };
+        find.columns = columns;
+        find.hit = if find.query.value.trim().is_empty() {
+            None
+        } else {
+            scrollback::find(screen, &find.query.value, reverse, previous)
+        };
+        find.excerpt = find.hit.and_then(|hit| hit.visible_text(screen));
+        output.changed();
+    }
+
+    pub(super) fn copy_selection(&mut self, manager: &Manager, clipboard: &mut impl Clipboard) {
+        let Some((marked, session)) = self.marked.as_ref().zip(manager.active()) else {
+            return;
+        };
+        let text = {
+            let output = session.output.lock().unwrap();
+            if !marked.has_range || !marked.valid(session.id, &output) {
+                return;
+            }
+            marked.cells.text(output.parser.screen())
+        };
+        if !text.is_empty() {
+            self.notice = Some(
+                if clipboard.set_text(&text).is_ok() {
+                    locale(["Selection copied", "Đã sao chép vùng chọn"], self.vi)
+                } else {
+                    locale(
+                        ["Clipboard unavailable", "Không thể dùng bảng nhớ tạm"],
+                        self.vi,
+                    )
+                }
+                .into(),
+            );
+        }
     }
 
     fn input_failed(&mut self) {
@@ -946,6 +1440,11 @@ pub(super) fn interact<W: io::Write>(
         let mut interact = || -> Result<()> {
             loop {
                 let layout = Layout::new(state.size, &manager.arrangement);
+                if layout.sidebar.is_none() {
+                    manager.arrangement.sidebar_focused = false;
+                    state.sidebar_query = None;
+                    state.sidebar_selected = None;
+                }
                 manager.resize_visible(&layout);
                 let (frame, hits) = render::frame(manager, &layout, &state);
                 painter.draw(&mut screen.out, frame, color)?;
@@ -959,7 +1458,17 @@ pub(super) fn interact<W: io::Write>(
                             state.complete(manager, result);
                         }
                         WorkspaceEvent::Input(event) => match event? {
-                            Event::Resize(cols, rows) => state.size = (cols, rows),
+                            Event::Resize(cols, rows) => {
+                                state.size = (cols, rows);
+                                state.marked = None;
+                            }
+                            Event::FocusLost => {
+                                state.release_mouse(manager);
+                                state.divider_drag = false;
+                                state.marked = None;
+                                state.sidebar_hover = None;
+                                state.hovered_command = None;
+                            }
                             Event::Key(key) => {
                                 if state.key(manager, &layout, key) {
                                     return Ok(());
@@ -984,6 +1493,7 @@ pub(super) fn interact<W: io::Write>(
         let _ = pump.join();
         result
     });
+    state.release_mouse(manager);
     for session in &manager.entries {
         session.watch(None);
     }

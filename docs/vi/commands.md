@@ -108,7 +108,13 @@ Bảng quản lý hiển thị nhánh, trạng thái Git, đường dẫn cục 
 
 Nhấn `:` để mở ô lệnh CNL dùng chung lịch sử, gợi ý và điều khiển kết quả với terminal chính. Nhấn `T` để mở terminal của repo đang có tiêu điểm.
 
-Trong terminal, nhấn F1 để mở phiên mới, F2 để đổi tên hiển thị, F3 để chia hoặc gộp khung, F4 để xem danh sách phiên và F5 để mở các thao tác như Di chuyển và Nhân bản. F6 và F7 chuyển phiên. F8 đóng phiên đang chọn, F9 khởi động lại và F10 quay về bảng quản lý. Phiên shell vẫn giữ trạng thái khi bạn quay về bảng quản lý. Nhân bản mở shell mới tại cùng thư mục ban đầu.
+Dùng thanh công cụ hoặc nhấn F1 để mở terminal. Bộ chọn tìm trong các kho mã cục bộ, ưu tiên kho vừa dùng trong lần chạy CNL hiện tại và liệt kê các shell đã cài. Bảng Phiên hiển thị mỗi phiên trên một dòng. Nhấn F4 để lấy tiêu điểm hoặc ẩn bảng, / để lọc, ↑ hoặc ↓ để di chuyển và Enter để lấy tiêu điểm phiên. F6 và F7 chuyển phiên trực tiếp.
+
+F3 chia pane hoặc quay về một pane. Kéo vạch chia hoặc dùng Ctrl+Shift+Trái và Ctrl+Shift+Phải để đổi tỷ lệ pane đầu. Ctrl+Shift+P chuyển tiêu điểm sang pane còn lại, Ctrl+Shift+M phóng to hoặc khôi phục pane. Hồ sơ lưu chế độ hiển thị bảng Phiên và tỷ lệ chia.
+
+Nhấn F5, dùng nút trên tiêu đề pane hoặc bấm chuột phải vào phiên để mở **Thao tác**. Menu liệt kê thao tác khả dụng cùng phím tắt, gồm Đổi tên, Nhân bản, Di chuyển, Khởi động lại và Đóng. F10 quay về Trình quản lý repo và giữ các phiên đang mở. Nhân bản mở shell mới tại cùng thư mục ban đầu.
+
+Ctrl+Shift+F tìm trong đầu ra còn lưu của pane hiện tại. Enter hoặc F3 chuyển đến kết quả sau, Shift+Enter hoặc Shift+F3 chuyển về kết quả trước và Esc trở lại shell. Kéo chuột để chọn văn bản đang hiển thị. Giữ Shift khi kéo nếu ứng dụng terminal đang bắt sự kiện chuột. Sao chép bằng Ctrl+Shift+C hoặc mục **Sao chép vùng chọn** trong Thao tác. Ctrl+C vẫn gửi tín hiệu ngắt tới shell. Tìm kiếm dùng phần đầu ra mà bộ phân tích terminal còn giữ ở độ rộng hiện tại của pane.
 
 ### Tùy chọn khởi động cho `run` và `dev`
 
