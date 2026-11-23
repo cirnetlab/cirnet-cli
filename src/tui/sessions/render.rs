@@ -126,7 +126,6 @@ fn toolbar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, vi: bool) {
         Command::Split,
         Command::Sidebar,
         Command::Menu,
-        Command::Back,
     ] {
         let name = if command == Command::Split && manager.arrangement.split_active() {
             locale(["Unsplit", "Bỏ chia"], vi)
@@ -394,12 +393,7 @@ fn footer(frame: &mut Frame, manager: &Manager, state: &State) {
         footer.push(Tone::Muted, &shortcut);
     }
     if frame.size.0 >= 80 {
-        write_span(
-            footer,
-            Tone::Muted,
-            "  F6/F7  ‹/›    Shift+PgUp/PgDn ",
-            frame.size.0,
-        );
+        write_span(footer, Tone::Muted, "  F6/F7 ", frame.size.0);
     }
 }
 

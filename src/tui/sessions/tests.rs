@@ -116,6 +116,40 @@ fn interactive_shells_keep_working_directories_and_environment_isolated() {
 }
 
 #[test]
+fn terminal_shows_back_in_footer_and_omits_scroll_hints() {
+    use super::workspace::State;
+
+    let workspace = Workspace {
+        root: std::env::temp_dir(),
+    };
+    let flags = crate::cli::app().get_matches_from(["cnl"]);
+    let manager = Manager::default();
+    for width in [64, 125] {
+        let size = (width, 24);
+        let (events, _receiver) = std::sync::mpsc::sync_channel(1);
+        let state = State::new(
+            size,
+            Catalog::new(&workspace, &flags, Some(&[])),
+            false,
+            events,
+        );
+        let layout = Layout::new(size, &manager.arrangement);
+        let (frame, _) = render::frame(&manager, &layout, &state);
+        let toolbar = frame.rows[0].contents();
+        let footer = frame.rows.last().unwrap().contents();
+
+        assert!(toolbar.contains("F5"));
+        assert!(!toolbar.contains("F10"));
+        assert!(footer.contains("F10 Back"));
+        assert!(!footer.contains("‹/›"));
+        assert!(!footer.contains("Shift+PgUp/PgDn"));
+        if width >= 80 {
+            assert!(footer.contains("F6/F7"));
+        }
+    }
+}
+
+#[test]
 fn terminal_keys_keep_native_interrupts_and_cursor_modes() {
     let control_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(key_bytes(control_c, false).unwrap(), b"\x03");
