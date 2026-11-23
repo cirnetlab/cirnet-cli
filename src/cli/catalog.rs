@@ -32,7 +32,7 @@ pub(crate) const ENTRIES: &[Entry] = &[
         label: localization::MENU_REPOS_LABEL,
         detail: localization::MENU_REPOS_DETAIL,
         command: "repos",
-        recommendation: Some("status"),
+        recommendation: None,
     },
     Entry {
         label: localization::MENU_BUILD_LABEL,
@@ -120,13 +120,11 @@ fn localize_command(mut command: clap::Command, parent: &str, vi: bool) -> clap:
             "show" => Some(localization::COMMAND_ENV_SHOW),
             "check" => Some(localization::COMMAND_ENV_CHECK),
             "set" => Some(localization::COMMAND_ENV_SET),
-            "discover" => Some(localization::COMMAND_REPO_DISCOVER),
-            "clone" => Some(localization::COMMAND_REPO_CLONE),
-            "update" => Some(localization::COMMAND_REPO_UPDATE),
             "__complete" => Some(localization::COMMAND_COMPLETION_QUERY),
             _ => None,
         },
     }
+    .or_else(|| crate::repositories::description(parent, name))
     .map(|value| text(value, vi))
     .or_else(|| detail(name, vi));
     let description =

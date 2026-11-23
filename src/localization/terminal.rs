@@ -43,7 +43,7 @@ pub(crate) const TERMINAL_ALREADY_OPEN: Localized = [
     "The CIRNETLAB terminal is already open.",
     "Terminal CIRNETLAB đang mở.",
 ];
-#[cfg(not(windows))]
+#[cfg(not(any(unix, windows)))]
 pub(crate) const CANCELLATION_WINDOWS_ONLY: Localized = [
     "Process tree cancellation is available on Windows",
     "Hủy cây tiến trình được hỗ trợ trên Windows",

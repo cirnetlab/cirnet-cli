@@ -1,5 +1,6 @@
 use std::{
     io,
+    path::Path,
     process::{Command, ExitStatus},
 };
 
@@ -8,7 +9,7 @@ use anyhow::{Context, Result, bail};
 
 pub(crate) const SHELLS: [&str; 4] = ["powershell", "cmd", "bash", "wsl"];
 
-fn shell(selected: Option<&str>) -> Result<Command> {
+pub(crate) fn shell(selected: Option<&str>) -> Result<Command> {
     match selected.unwrap_or(if cfg!(windows) { "powershell" } else { "bash" }) {
         "powershell" if cfg!(windows) => {
             let mut command = Command::new("pwsh.exe");
@@ -34,8 +35,14 @@ fn shell(selected: Option<&str>) -> Result<Command> {
     }
 }
 
-pub(crate) fn interactive(selected: Option<&str>) -> Result<ExitStatus> {
+pub(crate) fn interactive_in(
+    selected: Option<&str>,
+    directory: Option<&Path>,
+) -> Result<ExitStatus> {
     let mut command = shell(selected)?;
+    if let Some(directory) = directory {
+        command.current_dir(directory);
+    }
     let name = command.get_program().to_string_lossy().into_owned();
     command.status().with_context(|| {
         format!(

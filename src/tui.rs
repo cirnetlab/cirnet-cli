@@ -6,7 +6,9 @@ mod editor;
 mod highlight;
 mod history;
 mod interaction;
+mod repositories;
 mod runner;
+mod sessions;
 mod terminal;
 mod view;
 mod viewport;
@@ -21,7 +23,7 @@ use self::{
     terminal::{Painter, Screen, Tone},
     viewport::Buffer,
 };
-use crate::workspace::Workspace;
+use crate::{repositories as management, workspace::Workspace};
 use clap::ArgMatches;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind},
@@ -233,6 +235,8 @@ enum Effect {
     Redraw,
     Run(Vec<String>),
     Native(String),
+    Repositories(bool),
+    RepositoryTerminal(String, Option<String>),
     Cancel,
     Exit,
 }
@@ -324,6 +328,10 @@ impl Menu {
         };
         if entry.command.is_empty() {
             return Effect::Exit;
+        }
+        if entry.command == "repos" {
+            self.close_main_prompt();
+            return Effect::Repositories(false);
         }
         let input = Input::at_end(format!("{} ", entry.command));
         self.open_prompt(input);
@@ -661,6 +669,10 @@ impl Menu {
         if args.is_empty() || args[0] == "tui" {
             prompt.error = Some(labels::ENTER_CNL_COMMAND);
             return Effect::Redraw;
+        }
+        if let Some(effect) = repository_view_request(&args) {
+            self.close_main_prompt();
+            return effect;
         }
         self.history.record_cnl(&prompt.input.value, &args);
         self.history.reset_navigation();
@@ -1010,6 +1022,11 @@ fn show(
 ) -> io::Result<()> {
     // Restore the terminal before joining an owned worker on an I/O error.
     let mut running: Option<runner::Runner> = None;
+    let mut sessions = sessions::Manager::default();
+    let (mut context, values) = repository_state(workspace, flags);
+    menu.completer.set_repository_values(values);
+    let mut refresh: Option<std::sync::mpsc::Receiver<RepositoryState>> = None;
+    let mut refresh_after_run = false;
     let mut screen = Screen::enter(io::BufWriter::with_capacity(64 * 1024, io::stdout().lock()))?;
     let mut painter = Painter::default();
     let mut size = console::size()?;
@@ -1023,6 +1040,19 @@ fn show(
     let mut glow_cadence = animation::Cadence::new(Instant::now());
     let mut glowing = false;
     loop {
+        if let Some(receiver) = &refresh {
+            match receiver.try_recv() {
+                Ok((updated, values)) => {
+                    context = updated;
+                    menu.completer.set_repository_values(values);
+                    menu.refresh_completion_labels();
+                    refresh = None;
+                    redraw = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => refresh = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
         if menu.completer.metadata_ready()
             && menu
                 .prompt
@@ -1045,6 +1075,9 @@ fn show(
                 if let Some(result) = update.result {
                     output.finish(Ok(result), menu.vi);
                     running = None;
+                    if std::mem::take(&mut refresh_after_run) {
+                        refresh = Some(refresh_repository_state(workspace, flags));
+                    }
                     redraw = true;
                 } else if animate {
                     redraw |= output.animate();
@@ -1069,6 +1102,7 @@ fn show(
         }
         let timeout = [
             running.is_some().then_some(Duration::from_millis(16)),
+            refresh.is_some().then_some(Duration::from_millis(50)),
             menu.completer
                 .metadata_pending()
                 .then_some(Duration::from_millis(50)),
@@ -1155,7 +1189,21 @@ fn show(
                     menu.begin_output(&[]);
                     let output = menu.output.as_mut().expect("output was created");
                     output.title = None;
-                    match runner::Runner::start_native(&line, menu.vi) {
+                    let result = if refresh.is_some() {
+                        Err(anyhow::anyhow!("{}", management::context_refreshing()))
+                    } else {
+                        context
+                            .as_ref()
+                            .map_err(|detail| anyhow::anyhow!("{detail}"))
+                            .and_then(|active| {
+                                runner::Runner::start_native(
+                                    &line,
+                                    menu.vi,
+                                    active.as_ref().map(|(path, _)| path.as_path()),
+                                )
+                            })
+                    };
+                    match result {
                         Ok(worker) => {
                             output.follow = true;
                             running = Some(worker);
@@ -1169,7 +1217,19 @@ fn show(
                     if let Some(shell) = native_shell_request(&args) {
                         drop(screen);
                         let started = Instant::now();
-                        let result = crate::cli::native::interactive(shell.as_deref())
+                        let result = context
+                            .as_ref()
+                            .map_err(|detail| anyhow::anyhow!("{detail}"))
+                            .and_then(|active| {
+                                let preferred = active
+                                    .as_ref()
+                                    .and_then(|(_, preferred)| preferred.as_deref());
+                                let path = active.as_ref().map(|(path, _)| path.as_path());
+                                crate::cli::native::interactive_in(
+                                    shell.as_deref().or(preferred),
+                                    path,
+                                )
+                            })
                             .map(|status| runner::RunOutput {
                                 outcome: if status.success() {
                                     runner::Outcome::Pass
@@ -1197,6 +1257,7 @@ fn show(
                     }
                     match runner::Runner::start(workspace, flags, &args, menu.vi) {
                         Ok(worker) => {
+                            refresh_after_run = args.iter().any(|arg| arg == "repos");
                             menu.output.as_mut().expect("output was created").follow = true;
                             running = Some(worker);
                         }
@@ -1208,10 +1269,130 @@ fn show(
                     }
                     redraw = true;
                 }
+                effect @ (Effect::Repositories(_) | Effect::RepositoryTerminal(_, _)) => {
+                    drop(screen);
+                    let localized = flags.clone();
+                    let result = match effect {
+                        Effect::Repositories(update) => repositories::open(
+                            workspace,
+                            &localized,
+                            update,
+                            &mut sessions,
+                            menu.vi,
+                        ),
+                        Effect::RepositoryTerminal(selector, shell) => {
+                            management::terminal_context(workspace, &localized, &selector).and_then(
+                                |(key, path, preferred)| {
+                                    sessions.open(
+                                        &key,
+                                        &path,
+                                        shell.as_deref().or(preferred.as_deref()),
+                                        menu.vi,
+                                    )
+                                },
+                            )
+                        }
+                        _ => unreachable!(),
+                    };
+                    refresh = Some(refresh_repository_state(workspace, flags));
+                    screen = Screen::enter(io::BufWriter::with_capacity(
+                        64 * 1024,
+                        io::stdout().lock(),
+                    ))?;
+                    painter = Painter::default();
+                    glowing = false;
+                    glow_cadence.suspend(Instant::now());
+                    size = console::size()?;
+                    if let Err(error) = result {
+                        menu.begin_output(&["repos".into()]);
+                        menu.output
+                            .as_mut()
+                            .expect("output was created")
+                            .finish(Err(error.to_string()), menu.vi);
+                    }
+                    redraw = true;
+                    break;
+                }
                 Effect::Exit => return Ok(()),
             }
         }
     }
+}
+
+type RepositoryState = (Result<management::ActiveContext, String>, Vec<String>);
+
+fn repository_state(workspace: &Workspace, flags: &ArgMatches) -> RepositoryState {
+    (
+        management::active_context(workspace, flags).map_err(|error| error.to_string()),
+        management::completion_values(workspace, flags).unwrap_or_default(),
+    )
+}
+
+fn refresh_repository_state(
+    workspace: &Workspace,
+    flags: &ArgMatches,
+) -> std::sync::mpsc::Receiver<RepositoryState> {
+    let workspace = Workspace {
+        root: workspace.root.clone(),
+    };
+    let flags = flags.clone();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(repository_state(&workspace, &flags));
+    });
+    receiver
+}
+
+fn repository_view_request(args: &[String]) -> Option<Effect> {
+    if !args.iter().any(|arg| arg == "repos") {
+        return None;
+    }
+    let matches = crate::cli::app()
+        .try_get_matches_from(std::iter::once("cnl").chain(args.iter().map(String::as_str)))
+        .ok()?;
+    if matches.get_flag("json") {
+        return None;
+    }
+    let repos = matches.subcommand_matches("repos")?;
+    if let Some(update) = management::wants_dashboard(repos) {
+        return Some(Effect::Repositories(update));
+    }
+    let terminal = repos.subcommand_matches("terminal")?;
+    Some(Effect::RepositoryTerminal(
+        terminal.get_one::<String>("target")?.clone(),
+        terminal.get_one::<String>("shell").cloned(),
+    ))
+}
+
+pub(crate) fn open_repositories(
+    workspace: &Workspace,
+    flags: &ArgMatches,
+    update: bool,
+) -> anyhow::Result<()> {
+    let vi = flags
+        .get_one::<String>("lang")
+        .is_some_and(|lang| lang == "vi");
+    repositories::open(
+        workspace,
+        flags,
+        update,
+        &mut sessions::Manager::default(),
+        vi,
+    )
+}
+
+pub(crate) fn open_repository_terminal(
+    workspace: &Workspace,
+    flags: &ArgMatches,
+    term: &ArgMatches,
+) -> anyhow::Result<()> {
+    let selector = term.get_one::<String>("target").expect("required target");
+    let shell = term.get_one::<String>("shell").map(String::as_str);
+    let vi = flags
+        .get_one::<String>("lang")
+        .is_some_and(|lang| lang == "vi");
+    let (key, path, preferred) = management::terminal_context(workspace, flags, selector)?;
+    sessions::Manager::default().open(&key, &path, shell.or(preferred.as_deref()), vi)
 }
 
 fn native_shell_request(args: &[String]) -> Option<Option<String>> {
@@ -1280,7 +1461,10 @@ mod state_tests {
     #[test]
     fn menu_commands_open_fresh_base_prompts_and_offer_valid_actions() {
         let mut menu = Menu::new(false);
-        for entry in ENTRIES.iter().filter(|entry| !entry.command.is_empty()) {
+        for entry in ENTRIES
+            .iter()
+            .filter(|entry| !matches!(entry.command, "" | "repos"))
+        {
             choose(&mut menu, entry.command);
             assert_eq!(
                 menu.prompt.as_ref().unwrap().input.value,

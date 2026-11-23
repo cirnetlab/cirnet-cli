@@ -53,10 +53,14 @@ The rest of this reference uses `cnl`. If it is not on PATH, call the executable
 | `cnl env set [--port N] [--hardware-port N] [--dev-port N] [--dry-run]` | Save or preview port changes for the profile. Unspecified ports retain their current values. |
 | `cnl setup [--dry-run]` | Prepare the profile after checking prerequisites. |
 | `cnl setup --browser [--receipt <RECEIPT>] [--dry-run]` | Install the selected candidate's Chromium in the profile. |
-| `cnl repos discover` | List expected checkout locations and whether each checkout is present. |
-| `cnl repos status` | Show branches, revisions, working tree changes, remotes and dependency availability. |
-| `cnl repos clone <KEY>... [--dry-run]` · `cnl repos clone --all [--dry-run]` | Clone repositories into missing destinations. With `--all`, verify the origin of existing checkouts and skip them. Requires Git access to the selected repositories. |
-| `cnl repos update <KEY>... [--dry-run]` · `cnl repos update --all [--dry-run]` | Fetch and fast-forward the selected checkouts. Each checkout must have a clean working tree and track the expected CIRNETLAB origin. |
+| `cnl repos` | Open the interactive [Repository Manager](#repository-manager). |
+| `cnl repos list` · `cnl repos status [REPO ...]` | List registrations or inspect selected worktrees and tracking information. |
+| `cnl repos discover [--root DIR] [--refresh \| --offline] [--query TEXT]` | Find local checkouts and accessible GitHub repositories. |
+| `cnl repos clone <REPO>...` · `cnl repos clone --all` | Clone into missing destinations and register verified checkouts. Bulk clone previews by default. |
+| `cnl repos add <REPO-OR-PATH>...` · `cnl repos add --all --root DIR` | Register existing Git checkouts. Bulk registration previews by default. |
+| `cnl repos register <REPO>` · `cnl repos remove <REPO>...` | Register a GitHub repository without cloning, or remove registry membership. |
+| `cnl repos update` · `cnl repos update <REPO>...` · `cnl repos update --all` | Open the interactive selector, or update the selected checkouts with fast-forward only. |
+| `cnl repos fetch <REPO>...` · `cnl repos fetch --all` | Fetch configured remotes. Fetch and update accept `--jobs N` and `--dry-run`. |
 | `cnl build --all [--offline] [--dry-run]` | Assemble the Windows x64 candidate through Remote and save its receipt for the profile. `--offline` uses cached dependencies. |
 | `cnl build --repo <KEY> [--repo <KEY> ...] [--offline] [--dry-run] [--receipt <RECEIPT>] [--fpga-toolchain <DIR>]` | Build selected components in dependency order. `--all` and `--repo` are mutually exclusive. Interface and Embedded use inputs from an existing candidate. |
 | `cnl run [RUNTIME OPTIONS]` | Start the native stack with Vite in development mode by default. Select `--mode packaged` for the verified packaged Interface. |
@@ -70,6 +74,37 @@ The rest of this reference uses `cnl`. If it is not on PATH, call the executable
 | `cnl verify --repo <KEY> [--repo <KEY> ...] [--receipt <RECEIPT>] [--fpga-toolchain <DIR>] [--dry-run]` | Run selected component checks. Interface tests use staged candidate inputs. Embedded runs its RTL checks with a pinned toolchain. |
 
 For Embedded, `CIRNET_FPGA_TOOLCHAIN_ROOT` is the fallback for `--fpga-toolchain`. Set `CNL_VERIFICATION_PYTHON` to select the Python executable for Simulator and Embedded checks. `--dry-run` is command-specific. Use `cnl doctor` to check prerequisites separately.
+
+### Repository Manager
+
+The workspace registry lives outside Git in the state directory. Use a GitHub `owner/name`, a configured alias, a local path, or an identifier such as `r:12` to select a repository. The existing native component keys are still available. `cnl build --all` continues to use the seven-component dependency graph.
+
+GitHub discovery uses `gh` signed in to `github.com`. It paginates repositories visible to that account and keeps a timestamped workspace cache. Use `--refresh` to update the cache or `--offline` to read it without contacting GitHub. Cloning and fetching use Git credentials with access to the selected repository.
+
+```powershell
+cnl repos discover --refresh
+cnl repos add --all --root . --dry-run
+cnl repos add --select ./Branch/my-local-repo ./cirnet-cli
+cnl repos group create tools
+cnl repos group add tools my-local-repo
+cnl repos switch my-local-repo
+cnl repos update --select my-local-repo cli --jobs 2 --dry-run
+```
+
+Use `--yes` to confirm bulk clone, add, or removal after checking the preview. Local discovery scans the selected root and up to two directory levels. Updates require clean, tracked branches and use fast-forward only. Results are reported per repository. Noninteractive updates require explicit scope.
+
+| Command | Behavior |
+| --- | --- |
+| `cnl repos config <REPO>` | Read settings. Use `--alias`, `--clear-alias`, `--name`, `--path`, `--remote`, `--preferred-branch`, or `--shell` to edit them. |
+| `cnl repos group list` · `cnl repos group create <GROUP>` | List or create groups. |
+| `cnl repos group add <GROUP> <REPO>...` · `cnl repos group remove <GROUP> [REPO ...]` | Manage membership. Omit repositories from group removal to remove the group. |
+| `cnl repos switch <REPO>` · `cnl repos terminal <REPO> [--shell NAME]` | Set the working context or open a repository terminal. |
+| `cnl repos diff <REPO> [--staged]` · `cnl repos log <REPO>` | Read changes or recent history. |
+| `cnl repos branches <REPO>` · `cnl repos worktrees <REPO>` · `cnl repos remotes <REPO>` | Inspect local branches, worktrees and remotes. |
+| `cnl repos branch <REPO> <BRANCH> [--switch]` · `cnl repos worktree <REPO> <PATH> --branch <BRANCH>` | Create or switch to a branch, or add a worktree for an existing branch. |
+| `cnl repos stage <REPO> <PATH>...` · `cnl repos commit <REPO> -m <MESSAGE>` · `cnl repos push <REPO>` | Stage named paths, commit staged changes, or push the tracked branch. Each command requires an explicit invocation. |
+
+In the dashboard, use `/` to search, Space to select, `G` to filter groups, `S` to sort, `A` for actions, and `T` for the current repository terminal. Review the targets and confirm mutations with `Y`. In a shell, use F6 and F7 to switch sessions, F8 to close, F9 to restart, and F10 to return to the dashboard. A detached session remains open until the manager exits or you close it.
 
 ### Runtime options for `run` and `dev`
 

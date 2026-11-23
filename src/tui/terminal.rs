@@ -4,7 +4,10 @@ use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{DisableMouseCapture, EnableMouseCapture},
     execute, queue,
-    style::{Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor},
+    style::{
+        Attribute, Attributes, Color, Print, SetAttribute, SetAttributes, SetBackgroundColor,
+        SetForegroundColor,
+    },
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{
@@ -89,6 +92,11 @@ pub(super) enum Tone {
     Match,
     Selection,
     Palette(PalettePart),
+    Pty {
+        foreground: Option<Color>,
+        background: Option<Color>,
+        attributes: Attributes,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +166,7 @@ struct Style {
     color: Option<Color>,
     background: Option<Color>,
     attribute: Option<Attribute>,
+    terminal_attributes: Attributes,
 }
 
 impl Style {
@@ -211,6 +220,18 @@ impl Style {
             Tone::Error => depth.color((244, 137, 130), 210, Red),
             Tone::Stderr => depth.color((178, 176, 187), 249, Grey),
             Tone::Palette(part) => return Self::palette(part, depth),
+            Tone::Pty {
+                foreground,
+                background,
+                attributes,
+            } => {
+                return Self {
+                    color: foreground,
+                    background,
+                    terminal_attributes: attributes,
+                    ..Self::default()
+                };
+            }
         };
         Self {
             color: Some(color),
@@ -262,10 +283,17 @@ impl Style {
             color: Some(color),
             background,
             attribute: matches!(part, Selected | ContextSelected).then_some(Attribute::Bold),
+            ..Self::default()
         }
     }
 
-    fn write(self, out: &mut impl Write, previous: Self) -> io::Result<()> {
+    fn write(self, out: &mut impl Write, mut previous: Self) -> io::Result<()> {
+        if self.terminal_attributes != previous.terminal_attributes
+            && !previous.terminal_attributes.is_empty()
+        {
+            queue!(out, SetAttribute(Attribute::Reset))?;
+            previous = Self::default();
+        }
         if self.attribute != previous.attribute {
             if let Some(attribute) = previous.attribute {
                 let reset = if attribute == Attribute::Reverse {
@@ -278,6 +306,9 @@ impl Style {
             if let Some(attribute) = self.attribute {
                 queue!(out, SetAttribute(attribute))?;
             }
+        }
+        if self.terminal_attributes != previous.terminal_attributes {
+            queue!(out, SetAttributes(self.terminal_attributes))?;
         }
         if self.color != previous.color {
             queue!(out, SetForegroundColor(self.color.unwrap_or(Color::Reset)))?;

@@ -53,10 +53,14 @@ Các ví dụ bên dưới dùng `cnl`. Nếu CLI chưa có trong PATH, dùng `&
 | `cnl env set [--port N] [--hardware-port N] [--dev-port N] [--dry-run]` | Lưu hoặc xem trước thay đổi cổng cho hồ sơ. Các cổng không chỉ định giữ giá trị hiện tại. |
 | `cnl setup [--dry-run]` | Chuẩn bị hồ sơ sau khi kiểm tra các điều kiện cần thiết. |
 | `cnl setup --browser [--receipt <RECEIPT>] [--dry-run]` | Cài Chromium tương ứng với ứng viên đã chọn vào hồ sơ. |
-| `cnl repos discover` | Liệt kê đường dẫn checkout dự kiến và trạng thái hiện diện. |
-| `cnl repos status` | Xem nhánh, commit, thay đổi cục bộ, remote và trạng thái phụ thuộc. |
-| `cnl repos clone <KEY>... [--dry-run]` · `cnl repos clone --all [--dry-run]` | Clone repo vào những đường dẫn còn thiếu. Với `--all`, kiểm tra origin của checkout đã có rồi bỏ qua các checkout đó. Tài khoản Git cần quyền đọc các repo đã chọn. |
-| `cnl repos update <KEY>... [--dry-run]` · `cnl repos update --all [--dry-run]` | Fetch và cập nhật fast-forward các checkout đã chọn. Checkout phải sạch và theo dõi đúng origin CIRNETLAB. |
+| `cnl repos` | Mở [Trình quản lý repo](#trình-quản-lý-repo) tương tác. |
+| `cnl repos list` · `cnl repos status [REPO ...]` | Liệt kê mục đã đăng ký hoặc kiểm tra checkout và nhánh theo dõi của các repo đã chọn. |
+| `cnl repos discover [--root DIR] [--refresh \| --offline] [--query TEXT]` | Tìm checkout cục bộ và repo GitHub mà tài khoản có quyền truy cập. |
+| `cnl repos clone <REPO>...` · `cnl repos clone --all` | Clone vào đường dẫn còn trống và đăng ký checkout đã xác minh. Clone hàng loạt mặc định hiển thị bản xem trước. |
+| `cnl repos add <REPO-OR-PATH>...` · `cnl repos add --all --root DIR` | Đăng ký checkout Git hiện có. Thêm hàng loạt mặc định hiển thị bản xem trước. |
+| `cnl repos register <REPO>` · `cnl repos remove <REPO>...` | Đăng ký repo GitHub chưa có checkout hoặc gỡ mục khỏi danh bạ. |
+| `cnl repos update` · `cnl repos update <REPO>...` · `cnl repos update --all` | Mở màn hình chọn hoặc cập nhật các checkout đã chọn theo fast-forward. |
+| `cnl repos fetch <REPO>...` · `cnl repos fetch --all` | Fetch từ remote đã cấu hình. Fetch và update hỗ trợ `--jobs N` và `--dry-run`. |
 | `cnl build --all [--offline] [--dry-run]` | Dựng ứng viên Windows x64 qua Remote và lưu receipt cho hồ sơ. Cờ `--offline` dùng phụ thuộc từ cache. |
 | `cnl build --repo <KEY> [--repo <KEY> ...] [--offline] [--dry-run] [--receipt <RECEIPT>] [--fpga-toolchain <DIR>]` | Build các thành phần đã chọn theo thứ tự phụ thuộc. Chọn một trong hai cờ `--all` và `--repo`. Interface và Embedded dùng đầu vào từ ứng viên đã có. |
 | `cnl run [RUNTIME OPTIONS]` | Khởi động hệ thống native với Vite ở chế độ phát triển theo mặc định. Dùng `--mode packaged` để chạy Interface đóng gói đã kiểm chứng. |
@@ -70,6 +74,37 @@ Các ví dụ bên dưới dùng `cnl`. Nếu CLI chưa có trong PATH, dùng `&
 | `cnl verify --repo <KEY> [--repo <KEY> ...] [--receipt <RECEIPT>] [--fpga-toolchain <DIR>] [--dry-run]` | Kiểm tra các thành phần đã chọn. Interface dùng đầu vào từ ứng viên. Embedded chạy kiểm thử RTL với bộ công cụ đã ghim. |
 
 Với Embedded, biến `CIRNET_FPGA_TOOLCHAIN_ROOT` cung cấp đường dẫn khi thiếu `--fpga-toolchain`. Đặt `CNL_VERIFICATION_PYTHON` để chọn executable Python cho các kiểm tra Simulator và Embedded. Cờ `--dry-run` chỉ hoạt động ở các lệnh đã liệt kê. Dùng `cnl doctor` để kiểm tra riêng các điều kiện cần thiết.
+
+### Trình quản lý repo
+
+Danh bạ của workspace nằm trong thư mục trạng thái ngoài Git. Chọn repo bằng `owner/name` trên GitHub, bí danh, đường dẫn cục bộ hoặc định danh như `r:12`. Các khóa component native hiện có vẫn dùng được. `cnl build --all` tiếp tục dùng đồ thị phụ thuộc bảy component.
+
+Tính năng khám phá GitHub dùng `gh` đã đăng nhập vào `github.com`. CLI đọc tất cả các trang repo mà tài khoản có quyền xem và lưu thời điểm làm mới danh mục theo workspace. Dùng `--refresh` để làm mới hoặc `--offline` để đọc cache ngoại tuyến. Clone và fetch dùng thông tin xác thực Git có quyền truy cập repo đã chọn.
+
+```powershell
+cnl repos discover --refresh
+cnl repos add --all --root . --dry-run
+cnl repos add --select ./Branch/my-local-repo ./cirnet-cli
+cnl repos group create tools
+cnl repos group add tools my-local-repo
+cnl repos switch my-local-repo
+cnl repos update --select my-local-repo cli --jobs 2 --dry-run
+```
+
+Dùng `--yes` để xác nhận clone, thêm hoặc gỡ hàng loạt sau khi xem trước. CLI quét thư mục đã chọn và tối đa hai cấp thư mục con. Update yêu cầu nhánh sạch có upstream và chỉ cập nhật fast-forward. Kết quả được báo theo từng repo. Khi chạy không tương tác, cần chỉ định phạm vi update.
+
+| Lệnh | Hành vi |
+| --- | --- |
+| `cnl repos config <REPO>` | Xem cấu hình. Dùng `--alias`, `--clear-alias`, `--name`, `--path`, `--remote`, `--preferred-branch` hoặc `--shell` để sửa. |
+| `cnl repos group list` · `cnl repos group create <GROUP>` | Liệt kê hoặc tạo nhóm. |
+| `cnl repos group add <GROUP> <REPO>...` · `cnl repos group remove <GROUP> [REPO ...]` | Quản lý thành viên. Bỏ danh sách repo trong lệnh gỡ để gỡ cả nhóm. |
+| `cnl repos switch <REPO>` · `cnl repos terminal <REPO> [--shell NAME]` | Đặt ngữ cảnh làm việc hoặc mở terminal cho repo. |
+| `cnl repos diff <REPO> [--staged]` · `cnl repos log <REPO>` | Xem thay đổi hoặc lịch sử gần đây. |
+| `cnl repos branches <REPO>` · `cnl repos worktrees <REPO>` · `cnl repos remotes <REPO>` | Xem nhánh cục bộ, worktree và remote. |
+| `cnl repos branch <REPO> <BRANCH> [--switch]` · `cnl repos worktree <REPO> <PATH> --branch <BRANCH>` | Tạo hoặc chuyển nhánh, hoặc thêm worktree cho nhánh có sẵn. |
+| `cnl repos stage <REPO> <PATH>...` · `cnl repos commit <REPO> -m <MESSAGE>` · `cnl repos push <REPO>` | Stage đường dẫn chỉ định, commit phần đã stage hoặc push nhánh theo dõi. Bạn phải gọi rõ từng lệnh. |
+
+Trong bảng quản lý, dùng `/` để tìm, Space để chọn, `G` để lọc nhóm, `S` để sắp xếp, `A` để mở thao tác và `T` để mở terminal của repo hiện tại. Kiểm tra danh sách rồi nhấn `Y` để xác nhận thay đổi. Trong shell, dùng F6 và F7 để chuyển phiên, F8 để đóng, F9 để khởi động lại và F10 để trở về bảng quản lý. Phiên tạm rời vẫn chạy đến khi bạn đóng phiên hoặc thoát trình quản lý.
 
 ### Tùy chọn khởi động cho `run` và `dev`
 

@@ -17,6 +17,7 @@
 - Share bounded command history across views and let users save eligible CNL history for a profile.
 - Add local Git and native shell suggestions, responsive layouts and a reduced-motion-aware input border.
 - Soften the copper input border sweep and pause its motion while editing.
+- Add a workspace repository registry, cached GitHub discovery, parallel Git synchronization, and a dashboard with persistent repository terminals.
 
 ### Tiếng Việt
 
@@ -33,3 +34,4 @@
 - Dùng chung lịch sử lệnh có giới hạn giữa các màn hình và cho phép lưu lệnh CNL đủ điều kiện vào hồ sơ.
 - Bổ sung gợi ý Git và shell native từ dữ liệu cục bộ, bố cục linh hoạt và hiệu ứng viền ô nhập có thể tắt.
 - Làm dịu dải sáng màu đồng trên viền ô nhập và tạm dừng hiệu ứng khi chỉnh sửa.
+- Thêm danh bạ repo theo workspace, khám phá GitHub qua cache, đồng bộ Git song song và bảng quản lý có terminal riêng cho từng repo.

@@ -11,7 +11,7 @@ use crate::{
     build,
     environment::{self, State},
     localization::{self, message, set_language},
-    runtime, tui,
+    repositories, runtime, tui,
     workspace::{Repo, Workspace},
 };
 
@@ -71,17 +71,6 @@ pub fn app() -> Command {
 }
 
 pub(crate) fn app_for(vi: bool) -> Command {
-    let repo_change = |operation| {
-        Command::new(operation)
-            .arg(Arg::new("targets").num_args(1..).value_parser(Repo::KEYS))
-            .arg(flag("all"))
-            .group(
-                ArgGroup::new("scope")
-                    .args(["targets", "all"])
-                    .required(true),
-            )
-            .arg(flag("dry-run"))
-    };
     catalog::localize(
         Command::new("cnl")
             .version(env!("CARGO_PKG_VERSION"))
@@ -109,14 +98,7 @@ pub(crate) fn app_for(vi: bool) -> Command {
                     ports(Command::new("set").arg(flag("dry-run"))),
                 ]),
                 Command::new("setup").args([flag("browser"), path("receipt"), flag("dry-run")]),
-                Command::new("repos")
-                    .subcommand_required(true)
-                    .subcommands([
-                        Command::new("discover"),
-                        Command::new("status"),
-                        repo_change("clone"),
-                        repo_change("update"),
-                    ]),
+                repositories::command(),
                 Command::new("build")
                     .group(ArgGroup::new("scope").args(["all", "repo"]).required(true))
                     .args([
@@ -183,8 +165,24 @@ pub fn run() -> Result<()> {
                 {
                     bail!("{}", catalog::text(localization::SHELL_INTERACTIVE, vi));
                 }
-                let status =
-                    native::interactive(args.get_one::<String>("shell").map(String::as_str))?;
+                let selected = args.get_one::<String>("shell").map(String::as_str);
+                let workspace = Workspace::discover(
+                    matches
+                        .get_one::<PathBuf>("workspace")
+                        .map(PathBuf::as_path),
+                )
+                .ok();
+                let active = workspace
+                    .as_ref()
+                    .map(|workspace| repositories::active_context(workspace, &matches))
+                    .transpose()?
+                    .flatten();
+                let (directory, preferred) = active
+                    .as_ref()
+                    .map_or((None, None), |(directory, preferred)| {
+                        (Some(directory.as_path()), preferred.as_deref())
+                    });
+                let status = native::interactive_in(selected.or(preferred), directory)?;
                 std::process::exit(status.code().unwrap_or(1));
             }
             _ => {}
@@ -209,11 +207,32 @@ pub fn run() -> Result<()> {
         return tui::open(&workspace, &matches);
     }
     if name == "repos" {
-        return display(
-            repo_command(&workspace, arguments)?,
-            matches.get_flag("json"),
-            vi,
-        );
+        if let Some(update) = repositories::wants_dashboard(arguments) {
+            if matches.get_flag("json")
+                || !std::io::stdin().is_terminal()
+                || !std::io::stdout().is_terminal()
+            {
+                eprintln!("{}", repositories::interactive_required(update));
+                std::process::exit(2);
+            }
+            return tui::open_repositories(&workspace, &matches, update);
+        }
+        if let Some(terminal) = arguments.subcommand_matches("terminal") {
+            if matches.get_flag("json")
+                || !std::io::stdin().is_terminal()
+                || !std::io::stdout().is_terminal()
+            {
+                bail!("{}", repositories::interactive_required(false));
+            }
+            return tui::open_repository_terminal(&workspace, &matches, terminal);
+        }
+        let report = repositories::execute(&workspace, &matches, arguments)?;
+        let failed = report["ok"] == false;
+        display(report, matches.get_flag("json"), vi)?;
+        if failed {
+            bail!("{}", repositories::operation_failed());
+        }
+        return Ok(());
     }
     if name == "doctor" {
         let report = environment::doctor(&workspace);
@@ -301,31 +320,6 @@ pub(crate) fn local_terminal_language(args: &[String]) -> Option<bool> {
         return None;
     }
     matches.get_one::<String>("lang").map(|lang| lang == "vi")
-}
-
-fn repo_command(workspace: &Workspace, args: &ArgMatches) -> Result<Value> {
-    let (action, options) = args.subcommand().expect("required repository operation");
-    if matches!(action, "discover" | "status") {
-        return Ok(
-            json!({"workspace":workspace.root,"repositories":workspace.inventory(action == "status")}),
-        );
-    }
-    let mut selected = Vec::new();
-    if options.get_flag("all") {
-        selected = if action == "clone" {
-            workspace.missing_checkouts()?
-        } else {
-            Repo::ALL.to_vec()
-        };
-    } else {
-        for key in options.get_many::<String>("targets").into_iter().flatten() {
-            let repo = Repo::parse(key);
-            if !selected.contains(&repo) {
-                selected.push(repo);
-            }
-        }
-    }
-    Ok(json!({"operations":workspace.mutate(action,&selected,options.get_flag("dry-run"))?}))
 }
 
 fn update_ports(state: &mut State, input: &ArgMatches) -> Result<()> {

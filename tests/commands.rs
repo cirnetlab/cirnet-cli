@@ -23,12 +23,19 @@ fn build_scope_is_explicit_and_orders_dependencies() {
 
 #[test]
 fn git_mutations_require_one_explicit_scope() {
-    for operation in ["clone", "update"] {
+    for operation in ["clone", "fetch", "add", "remove"] {
         assert!(
             cli::app()
                 .try_get_matches_from(["cnl", "repos", operation])
                 .is_err()
         );
+    }
+    assert!(
+        cli::app()
+            .try_get_matches_from(["cnl", "repos", "update"])
+            .is_ok()
+    );
+    for operation in ["clone", "update"] {
         assert!(
             cli::app()
                 .try_get_matches_from([
@@ -177,14 +184,16 @@ fn vietnamese_help_and_parser_diagnostics_localize_the_cli_grammar() {
         ),
         (&["run", "--port", "80"][..], "Giá trị không hợp lệ"),
         (&["build"][..], "Thiếu đối số bắt buộc"),
-        (&["repos"][..], "Thiếu lệnh con"),
+        (&["repos"][..], "cần terminal tương tác"),
         (&["unknown-command"][..], "Lệnh con không hợp lệ"),
     ] {
         let output = run(&[&["--lang", "vi"], args].concat());
         assert_eq!(output.status.code(), Some(2), "{args:?}");
         let error = String::from_utf8(output.stderr).unwrap();
         assert!(error.contains(expected), "{args:?}: {error}");
-        assert!(error.contains("--help"));
+        if args != ["repos"] {
+            assert!(error.contains("--help"));
+        }
     }
     let invalid = run(&["--lang", "en", "run", "--mode", "another-mode"]);
     let invalid = String::from_utf8(invalid.stderr).unwrap();

@@ -147,12 +147,58 @@ pub(crate) fn option(id: &str) -> Option<Localized> {
         ],
         "dry-run" => ["Preview this operation", "Xem trước thao tác này"],
         "all" => ["Select the full scope", "Chọn toàn bộ phạm vi"],
-        "targets" => ["Repository keys", "Khóa repo"],
+        "targets" | "target" | "select" => [
+            "Repository selectors, aliases or paths",
+            "Tên định danh repo, bí danh hoặc đường dẫn",
+        ],
+        "root" => [
+            "Local directory to scan or use as a clone destination",
+            "Thư mục cục bộ để quét hoặc lưu checkout clone",
+        ],
+        "yes" => [
+            "Confirm the previewed bulk operation",
+            "Xác nhận thao tác hàng loạt đã xem trước",
+        ],
+        "refresh" => [
+            "Refresh the GitHub repository catalog",
+            "Làm mới danh mục repo GitHub",
+        ],
+        "query" => [
+            "Filter repositories by name or identifier",
+            "Lọc repo theo tên hoặc định danh",
+        ],
+        "jobs" => [
+            "Maximum concurrent repository operations",
+            "Số thao tác repo đồng thời tối đa",
+        ],
+        "alias" => ["Set the repository alias", "Đặt bí danh repo"],
+        "clear-alias" => ["Remove the repository alias", "Gỡ bí danh repo"],
+        "name" => ["Set the repository display name", "Đặt tên hiển thị repo"],
+        "remote" => [
+            "Select the configured Git remote",
+            "Chọn Git remote đã cấu hình",
+        ],
+        "preferred-branch" => [
+            "Set the preferred branch for this entry",
+            "Đặt nhánh ưu tiên cho mục này",
+        ],
+        "branch" => ["Git branch name", "Tên nhánh Git"],
+        "switch" => ["Switch to an existing branch", "Chuyển sang nhánh hiện có"],
+        "path" | "paths" => ["Local path or paths", "Đường dẫn cục bộ"],
+        "message" => ["Git commit message", "Nội dung commit Git"],
+        "staged" => [
+            "Show changes staged in the Git index",
+            "Hiển thị thay đổi đã stage trong Git index",
+        ],
+        "group" => ["Repository group name", "Tên nhóm repo"],
         "repo" => [
             "Select a repository; repeat to add more",
             "Chọn repo, lặp lại tùy chọn để thêm repo",
         ],
-        "offline" => ["Use cached dependency inputs", "Dùng phụ thuộc trong cache"],
+        "offline" => [
+            "Use cached data without accessing the network",
+            "Dùng dữ liệu trong cache mà không truy cập mạng",
+        ],
         "fpga-toolchain" => ["Pinned RTL toolchain root", "Thư mục RTL toolchain đã ghim"],
         "browser" => [
             "Install the selected candidate's Chromium",
@@ -175,6 +221,30 @@ pub(crate) fn option(id: &str) -> Option<Localized> {
 
 pub(crate) fn report_field(key: &str) -> Option<Localized> {
     Some(match key {
+        "active" => ["Active repository", "Repo hiện hành"],
+        "ahead" => ["Commits ahead", "Số commit đi trước"],
+        "behind" => ["Commits behind", "Số commit đi sau"],
+        "alias" => ["Alias", "Bí danh"],
+        "name" => ["Name", "Tên"],
+        "selector" | "id" => ["Identifier", "Định danh"],
+        "slug" => ["GitHub repository", "Repo GitHub"],
+        "repository" => ["Repository", "Kho mã nguồn"],
+        "group" => ["Group", "Nhóm"],
+        "groups" => ["Groups", "Các nhóm"],
+        "remote" | "remoteUrl" => ["Remote", "Remote"],
+        "confirmationRequired" => ["Confirmation required", "Cần xác nhận"],
+        "catalogRefreshed" => ["Last catalog refresh", "Lần cuối làm mới danh mục"],
+        "catalogStale" => ["Catalog stale", "Danh mục đã cũ"],
+        "discoveryStatus" => ["GitHub discovery status", "Trạng thái khám phá GitHub"],
+        "lastVerified" => ["Last verified", "Lần xác minh gần nhất"],
+        "lastSync" => ["Last synchronized", "Lần đồng bộ gần nhất"],
+        "lastBranch" => ["Last known branch", "Nhánh được ghi nhận gần nhất"],
+        "lastState" => ["Last known status", "Trạng thái ghi nhận gần nhất"],
+        "preferredBranch" => ["Preferred branch", "Nhánh ưu tiên"],
+        "registered" => ["Registered", "Đã đăng ký"],
+        "shell" => ["Shell", "Shell"],
+        "private" => ["Private repository", "Repo riêng tư"],
+        "archived" => ["Archived repository", "Repo đã lưu trữ"],
         "architecture" => ["Architecture", "Kiến trúc"],
         "branch" => ["Branch", "Nhánh"],
         "browser" => ["Browser", "Trình duyệt"],
@@ -242,6 +312,34 @@ pub(crate) fn report_field(key: &str) -> Option<Localized> {
 
 pub(crate) fn report_value(key: &str, value: &str) -> Option<Localized> {
     Some(match (key, value) {
+        ("state" | "lastState", "clean") => ["Clean", "Sạch"],
+        ("state" | "lastState", "modified") => ["Modified", "Đã sửa"],
+        ("state" | "lastState", "untracked") => ["Untracked files", "Có tệp chưa theo dõi"],
+        ("state" | "lastState", "conflicted") => ["Conflicted", "Có xung đột"],
+        ("state" | "lastState", "detached") => ["Detached HEAD", "HEAD tách rời"],
+        ("state", "local") => [
+            "Unregistered local checkout",
+            "Checkout cục bộ chưa đăng ký",
+        ],
+        ("state", "uncloned") => [
+            "Registered, no local checkout",
+            "Đã đăng ký, chưa có checkout",
+        ],
+        ("state", "available") => ["Available on GitHub", "Có trên GitHub"],
+        ("state", "preview") => ["Preview", "Xem trước"],
+        ("state", "succeeded") => SUCCEEDED,
+        ("state", "failed") => FAILED,
+        ("state", "cancelled") => CANCELLED,
+        ("discoveryStatus", "available") => ["Available", "Có sẵn"],
+        ("discoveryStatus", "offline") => ["Offline", "Ngoại tuyến"],
+        ("discoveryStatus", "cli-unavailable") => ["GitHub CLI unavailable", "Không có GitHub CLI"],
+        ("discoveryStatus", "authentication-required") => ["Sign-in required", "Cần đăng nhập"],
+        ("discoveryStatus", "permission-denied") => ["Permission denied", "Không có quyền"],
+        ("discoveryStatus", "rate-limited") => ["Rate limited", "Giới hạn yêu cầu"],
+        ("discoveryStatus", "unavailable") => ["Unavailable", "Không khả dụng"],
+        ("discoveryStatus", "invalid-response") => ["Invalid response", "Phản hồi không hợp lệ"],
+        ("operation", "add") => ["Register checkout", "Đăng ký checkout"],
+        ("operation", "remove") => ["Remove registration", "Gỡ đăng ký"],
         ("state", "built") => ["Built", "Đã dựng"],
         ("state", "checkout") => ["Available", "Có checkout"],
         ("state", "exited-without-confirmed-stop") => [
@@ -258,6 +356,7 @@ pub(crate) fn report_value(key: &str, value: &str) -> Option<Localized> {
         ("mode", "packaged") => ["Packaged", "Đóng gói"],
         ("operation", "clone") => ["Clone", "Sao chép checkout"],
         ("operation", "update") => ["Update", "Cập nhật checkout"],
+        ("operation", "fetch") => ["Fetch", "Fetch từ remote"],
         ("remotes", "unrecognized remote") => {
             ["Unrecognized remote", "Remote không nhận dạng được"]
         }
@@ -507,17 +606,14 @@ messages! {
     MENU_RUN_LABEL => "Run Program", "Chạy chương trình";
     MENU_BUILD_DETAIL => "Build the full native stack or selected components in dependency order.", "Build hệ thống native hoặc thành phần đã chọn theo thứ tự phụ thuộc.";
     MENU_BUILD_LABEL => "Build", "Bản dựng";
-    MENU_REPOS_DETAIL => "Discover and inspect the independent CIRNETLAB repositories.", "Tìm và kiểm tra các kho mã nguồn CIRNETLAB.";
-    MENU_REPOS_LABEL => "Repositories", "Kho mã nguồn";
+    MENU_REPOS_DETAIL => "Open the workspace repository registry, Git actions and terminals.", "Mở danh bạ repo, thao tác Git và terminal của workspace.";
+    MENU_REPOS_LABEL => "Repository Manager", "Quản lý kho mã nguồn";
     MENU_SETUP_DETAIL => "Prepare a development profile and optional Chromium.", "Chuẩn bị hồ sơ phát triển và Chromium nếu cần.";
     MENU_SETUP_LABEL => "Development setup", "Thiết lập phát triển";
     MENU_ENV_DETAIL => "Review the selected profile and its local ports.", "Xem hồ sơ đang chọn và các cổng cục bộ.";
     MENU_ENV_LABEL => "Environment", "Môi trường";
     MENU_DOCTOR_DETAIL => "Inspect the installed toolchains and runtime prerequisites.", "Kiểm tra toolchain và các điều kiện để chạy hệ thống.";
     MENU_DOCTOR_LABEL => "Diagnostics", "Chẩn đoán";
-    COMMAND_REPO_UPDATE => "Fast-forward selected clean checkouts", "Cập nhật fast-forward các checkout sạch đã chọn";
-    COMMAND_REPO_CLONE => "Clone selected missing checkouts", "Clone các checkout còn thiếu đã chọn";
-    COMMAND_REPO_DISCOVER => "List expected repository locations", "Liệt kê vị trí repo dự kiến";
     COMMAND_ENV_SET => "Update local profile ports", "Cập nhật cổng của hồ sơ cục bộ";
     COMMAND_ENV_CHECK => "Check profile and toolchain prerequisites", "Kiểm tra hồ sơ và điều kiện toolchain";
     COMMAND_ENV_SHOW => "Show the current profile", "Hiển thị hồ sơ hiện tại";

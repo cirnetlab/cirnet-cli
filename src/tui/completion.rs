@@ -157,6 +157,7 @@ fn fuzzy_score(candidate: &str, prefix: &str) -> Option<usize> {
 pub(super) struct Completer {
     vi: bool,
     native: native::Completer,
+    repositories: Vec<String>,
 }
 
 impl Completer {
@@ -164,11 +165,26 @@ impl Completer {
         Self {
             vi,
             native: native::Completer::new(),
+            repositories: crate::workspace::Repo::KEYS
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
         }
     }
 
     pub(super) fn set_language(&mut self, vi: bool) {
         self.vi = vi;
+    }
+
+    pub(super) fn set_repository_values(&mut self, values: Vec<String>) {
+        self.repositories = if values.is_empty() {
+            crate::workspace::Repo::KEYS
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        } else {
+            values
+        };
     }
 
     pub(super) fn metadata_ready(&self) -> bool {
@@ -235,11 +251,16 @@ impl Completer {
         }
         let mut command = grammar_for(self.vi);
         let mut command_path = Vec::new();
-        let mut value = None;
+        let mut value: Option<&Arg> = None;
         let mut positional = 0;
         let mut used_flags = Vec::new();
         for word in previous {
-            if value.take().is_some() {
+            if let Some(arg) = value.take()
+                && !word.value.starts_with("--")
+            {
+                if arg.get_id() == "select" {
+                    value = Some(arg);
+                }
                 continue;
             }
             if word.value == "--" {
@@ -261,7 +282,9 @@ impl Completer {
                     arg.get_index().is_some_and(|index| {
                         index == positional + 1
                             || index <= positional
-                                && matches!(arg.get_action(), clap::ArgAction::Append)
+                                && arg
+                                    .get_num_args()
+                                    .is_some_and(|range| range.max_values() > 1)
                     })
                 });
                 if !found_positional {
@@ -275,6 +298,7 @@ impl Completer {
         let mut insert = range;
         let flag_prefix = input[insert.start..cursor].starts_with('-');
         let explicit_flag = cursor - insert.start > 2;
+        let mut attached_value = false;
         if let Some((flag, _)) = input[insert.start..cursor]
             .strip_prefix("--")
             .and_then(|part| part.split_once('='))
@@ -283,9 +307,15 @@ impl Completer {
                 .get_arguments()
                 .find(|arg| arg.get_long() == Some(flag));
             insert.start += flag.len() + 3;
+            attached_value = true;
         }
-        if let Some(arg) = value {
-            Self::values(&mut candidates, arg);
+        if let Some(arg) = value.filter(|_| !flag_prefix || attached_value) {
+            self.values(
+                &mut candidates,
+                arg,
+                &command_path,
+                &input[insert.start..cursor],
+            );
         } else {
             for child in command
                 .get_subcommands()
@@ -317,8 +347,11 @@ impl Completer {
                     if (!repeatable && used_flags.contains(&flag))
                         || (arg.is_global_set() && !command_path.is_empty() && !explicit_flag)
                         || (arg.is_global_set() && !flag_prefix)
-                        || (flag == "all" && (used_flags.contains(&"repo") || positional > 0))
-                        || (flag == "repo" && used_flags.contains(&"all"))
+                        || (flag == "all"
+                            && (used_flags.contains(&"repo")
+                                || used_flags.contains(&"select")
+                                || positional > 0))
+                        || (matches!(flag, "repo" | "select") && used_flags.contains(&"all"))
                     {
                         continue;
                     }
@@ -334,25 +367,36 @@ impl Completer {
                     && arg.get_index().is_some_and(|index| {
                         index == positional + 1
                             || index <= positional
-                                && matches!(arg.get_action(), clap::ArgAction::Append)
+                                && arg
+                                    .get_num_args()
+                                    .is_some_and(|range| range.max_values() > 1)
                     })
                 {
-                    Self::values(&mut candidates, arg);
+                    self.values(
+                        &mut candidates,
+                        arg,
+                        &command_path,
+                        &input[insert.start..cursor],
+                    );
                 }
             }
         }
         let prefix = &input[insert.start..cursor];
         let original = &input[insert.clone()];
+        let prefix_match = |text: &str, label: &str, kind: Kind| {
+            text.starts_with(prefix)
+                || kind == Kind::Value && label.starts_with(prefix.trim_start_matches('"'))
+        };
         let has_prefix = candidates
             .iter()
-            .any(|(candidate, _, _, _)| candidate.starts_with(prefix));
+            .any(|(candidate, label, _, kind)| prefix_match(candidate, label, *kind));
         let mut ranked = candidates
             .into_iter()
             .filter_map(|(text, label, description, kind)| {
                 if text == original {
                     return None;
                 }
-                let score = if text.starts_with(prefix) {
+                let score = if prefix_match(&text, &label, kind) {
                     0
                 } else if !has_prefix && matches!(kind, Kind::Command | Kind::Subcommand) {
                     fuzzy_score(&text, prefix)?
@@ -389,7 +433,36 @@ impl Completer {
             .collect()
     }
 
-    fn values(candidates: &mut Vec<(String, String, String, Kind)>, arg: &Arg) {
+    fn values(
+        &self,
+        candidates: &mut Vec<(String, String, String, Kind)>,
+        arg: &Arg,
+        commands: &[&str],
+        prefix: &str,
+    ) {
+        if commands.first() == Some(&"repos")
+            && matches!(arg.get_id().as_str(), "target" | "targets" | "select")
+        {
+            for name in self
+                .repositories
+                .iter()
+                .filter(|name| name.starts_with(prefix.trim_start_matches('"')))
+                .take(LIMIT)
+            {
+                let text = if name.contains(char::is_whitespace) || name.contains(['\'', '"']) {
+                    format!("\"{}\"", name.replace('"', "\\\""))
+                } else {
+                    name.clone()
+                };
+                candidates.push((
+                    text,
+                    name.clone(),
+                    arg.get_help().map(ToString::to_string).unwrap_or_default(),
+                    Kind::Value,
+                ));
+            }
+            return;
+        }
         for value in arg
             .get_value_parser()
             .possible_values()
@@ -480,7 +553,16 @@ pub(crate) fn query(args: &clap::ArgMatches) -> anyhow::Result<()> {
     if cursor >= start {
         let offset = cursor - start;
         let mut output = std::io::stdout().lock();
-        for choice in Completer::new(false).cnl_suggestions(&line[start..], offset) {
+        let mut completer = Completer::new(false);
+        if line
+            .get(start..cursor)
+            .is_some_and(|input| input.split_whitespace().any(|word| word == "repos"))
+            && let Ok(workspace) = crate::workspace::Workspace::discover(None)
+            && let Ok(values) = crate::repositories::completion_values(&workspace, args)
+        {
+            completer.set_repository_values(values);
+        }
+        for choice in completer.cnl_suggestions(&line[start..], offset) {
             writeln!(output, "{}", choice.text)?;
         }
     }
@@ -497,6 +579,27 @@ mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn repository_selection_completes_aliases_across_multiple_selector_values() {
+        let mut completer = Completer::new(false);
+        completer.set_repository_values(vec!["alpha".into(), "beta".into(), "beta tools".into()]);
+        for input in ["repos update --select alpha be", "repos update alpha be"] {
+            let choices = completer.suggestions(input, input.len());
+            assert!(choices.iter().any(|item| item.text == "beta"), "{input}");
+            assert!(
+                choices.iter().any(|item| item.text == "\"beta tools\""),
+                "{input}"
+            );
+        }
+        let input = "repos update --select alpha --dr";
+        assert!(
+            completer
+                .suggestions(input, input.len())
+                .iter()
+                .any(|item| item.text == "--dry-run")
+        );
+    }
 
     struct TestDir(PathBuf);
 
