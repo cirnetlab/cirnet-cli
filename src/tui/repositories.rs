@@ -4,10 +4,10 @@ mod tests;
 mod view;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     fs,
     io::{self, IsTerminal},
-    path::{Path, PathBuf},
+    path::PathBuf,
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -15,21 +15,22 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::ArgMatches;
 use crossterm::{
-    event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEventKind},
+    event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
     terminal as console,
 };
 use serde::{Deserialize, Serialize};
 
 use self::{
     actions::{Action, Plan, Target},
-    view::Layout,
+    view::{Layout, TableHits},
 };
 use super::{
-    OutputView,
+    History, OutputView,
     clipboard::{Clipboard, SystemClipboard},
     control,
     editor::Input,
     read_events,
+    repository_prompt::{PromptEvent, RepositoryPrompt},
     runner::Runner,
     sessions::Manager,
     terminal::{Frame, Painter, Screen, Tone, color_enabled},
@@ -47,42 +48,11 @@ fn tr(vi: bool, en: &'static str, vn: &'static str) -> &'static str {
     if vi { vn } else { en }
 }
 
-#[derive(Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum Sort {
-    #[default]
-    Name,
-    Branch,
-    Status,
-    Activity,
-}
-
-impl Sort {
-    fn label(self, vi: bool) -> &'static str {
-        match self {
-            Self::Name => tr(vi, "Name", "Tên"),
-            Self::Branch => tr(vi, "Branch", "Nhánh"),
-            Self::Status => tr(vi, "Status", "Trạng thái"),
-            Self::Activity => tr(vi, "Activity", "Hoạt động"),
-        }
-    }
-
-    fn next(self) -> Self {
-        match self {
-            Self::Name => Self::Branch,
-            Self::Branch => Self::Status,
-            Self::Status => Self::Activity,
-            Self::Activity => Self::Name,
-        }
-    }
-}
-
 #[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 struct Filters {
     search: String,
     group: Option<String>,
-    sort: Sort,
 }
 
 enum Overlay {
@@ -115,17 +85,31 @@ enum Effect {
     Refresh,
     Cancel,
     Exit,
-    Run { args: Vec<String>, action: Action },
-    Terminal(String),
+    CommandPrompt,
+    Run {
+        args: Vec<String>,
+        action: Action,
+    },
+    Terminal {
+        selector: String,
+        shell: Option<String>,
+    },
 }
 
 struct Dashboard {
     rows: Vec<Row>,
+    search_keys: Vec<String>,
     visible: Vec<usize>,
     groups: Vec<String>,
     checked: BTreeSet<String>,
+    selected: Option<String>,
     cursor: usize,
     scroll: usize,
+    horizontal: usize,
+    table_hits: TableHits,
+    rendered_overlay: Option<std::mem::Discriminant<Overlay>>,
+    hover: Option<String>,
+    path_focus: bool,
     filters: Filters,
     search: Input,
     searching: bool,
@@ -133,6 +117,8 @@ struct Dashboard {
     update_jobs: Option<u8>,
     vi: bool,
     overlay: Overlay,
+    parents: Vec<Overlay>,
+    overlay_scroll_max: usize,
     output: Option<OutputView>,
     notice: String,
     loading: bool,
@@ -142,11 +128,18 @@ impl Dashboard {
     fn new(vi: bool, update_only: bool) -> Self {
         Self {
             rows: Vec::new(),
+            search_keys: Vec::new(),
             visible: Vec::new(),
             groups: Vec::new(),
             checked: BTreeSet::new(),
+            selected: None,
             cursor: 0,
             scroll: 0,
+            horizontal: 0,
+            table_hits: TableHits::default(),
+            rendered_overlay: None,
+            hover: None,
+            path_focus: false,
             filters: Filters::default(),
             search: Input::default(),
             searching: false,
@@ -154,6 +147,8 @@ impl Dashboard {
             update_jobs: None,
             vi,
             overlay: Overlay::None,
+            parents: Vec::new(),
+            overlay_scroll_max: usize::MAX,
             output: None,
             notice: String::new(),
             loading: true,
@@ -168,21 +163,71 @@ impl Dashboard {
         self.row(self.cursor)
     }
 
-    fn replace_rows(&mut self, rows: Vec<Row>) {
-        let focus = self.focused().map(|row| row.selector.clone());
+    fn replace_rows(&mut self, mut rows: Vec<Row>) {
+        // Derive view order once per snapshot. The selector makes matching display names stable.
+        rows.sort_by_cached_key(|row| {
+            (
+                row.alias.as_deref().unwrap_or(&row.name).to_lowercase(),
+                row.selector.clone(),
+            )
+        });
+        let identities: BTreeSet<_> = rows.iter().map(|row| row.selector.as_str()).collect();
+        let old: HashMap<_, _> = self
+            .rows
+            .iter()
+            .map(|row| (row.selector.as_str(), row))
+            .collect();
+        let local: HashMap<_, _> = rows
+            .iter()
+            .filter_map(|row| {
+                row.path_identity()
+                    .map(|path| (path, row.selector.as_str()))
+            })
+            .collect();
+        let remap = |selector: &str| {
+            if identities.contains(selector) {
+                return Some(selector.to_owned());
+            }
+            let path = old.get(selector)?.path_identity()?;
+            local.get(&path).map(|selector| (*selector).to_owned())
+        };
+        self.selected = self.selected.as_deref().and_then(remap);
+        self.checked = self
+            .checked
+            .iter()
+            .filter_map(|selector| remap(selector))
+            .collect();
         self.rows = rows;
-        let identifiers: BTreeSet<_> = self.rows.iter().map(|row| row.selector.as_str()).collect();
-        self.checked
-            .retain(|item| identifiers.contains(item.as_str()));
-        self.rebuild(focus);
+        self.search_keys = self
+            .rows
+            .iter()
+            .map(|row| {
+                let local = row.display_path().unwrap_or_default();
+                let status = view::state_label(&row.state, self.vi).0;
+                format!(
+                    "{} {} {} {} {} {} {} {}",
+                    row.name,
+                    row.alias.as_deref().unwrap_or_default(),
+                    local,
+                    row.branch.as_deref().unwrap_or_default(),
+                    row.state,
+                    status,
+                    row.remote.as_deref().unwrap_or_default(),
+                    row.groups.join(" ")
+                )
+                .to_lowercase()
+            })
+            .collect();
+        self.rebuild();
     }
 
     fn refilter(&mut self) {
         self.filters.search.clone_from(&self.search.value);
-        self.rebuild(self.focused().map(|row| row.selector.clone()));
+        self.rebuild();
     }
 
-    fn rebuild(&mut self, focus: Option<String>) {
+    fn rebuild(&mut self) {
+        self.clear_table_hits();
         let query = self.filters.search.to_lowercase();
         let terms: Vec<_> = query.split_whitespace().collect();
         self.visible = self
@@ -196,58 +241,55 @@ impl Dashboard {
                     .as_ref()
                     .is_none_or(|group| row.groups.contains(group))
             })
-            .filter(|(_, row)| {
-                terms.is_empty() || {
-                    let local = row
-                        .path
-                        .as_deref()
-                        .map(Path::to_string_lossy)
-                        .unwrap_or_default();
-                    let status = view::state_label(&row.state, self.vi).0;
-                    let fields = format!(
-                        "{} {} {} {} {} {} {} {}",
-                        row.name,
-                        row.alias.as_deref().unwrap_or_default(),
-                        local,
-                        row.branch.as_deref().unwrap_or_default(),
-                        row.state,
-                        status,
-                        row.remote.as_deref().unwrap_or_default(),
-                        row.groups.join(" ")
-                    )
-                    .to_lowercase();
-                    terms.iter().all(|term| fields.contains(term))
-                }
+            .filter(|(index, _)| {
+                terms
+                    .iter()
+                    .all(|term| self.search_keys[*index].contains(term))
             })
             .map(|(index, _)| index)
             .collect();
-        // Tie-break by identity so a refresh keeps the same view order.
-        self.visible.sort_by_cached_key(|index| {
-            let row = &self.rows[*index];
-            let key = match self.filters.sort {
-                Sort::Branch => row.branch.as_deref().unwrap_or("~").to_lowercase(),
-                Sort::Status => row.state.clone(),
-                _ => String::new(),
-            };
-            let activity =
-                (self.filters.sort == Sort::Activity).then_some(std::cmp::Reverse(row.last_sync));
-            (
-                key,
-                activity,
-                row.name.to_lowercase(),
-                row.selector.as_str(),
-            )
-        });
         self.cursor = self
             .visible
             .iter()
-            .position(|index| focus.as_deref() == Some(self.rows[*index].selector.as_str()))
+            .position(|index| self.selected.as_deref() == Some(self.rows[*index].selector.as_str()))
             .unwrap_or(self.cursor)
             .min(self.visible.len().saturating_sub(1));
+        if self.selected.is_none() {
+            self.selected = self.focused().map(|row| row.selector.clone());
+        }
     }
 
     fn focus(&mut self, index: usize) {
         self.cursor = index.min(self.visible.len().saturating_sub(1));
+        self.selected = self.focused().map(|row| row.selector.clone());
+        self.hover = None;
+    }
+
+    fn clear_table_hits(&mut self) {
+        self.table_hits = TableHits::default();
+        self.hover = None;
+    }
+
+    fn push_overlay(&mut self, next: Overlay) {
+        self.parents
+            .push(std::mem::replace(&mut self.overlay, next));
+        self.overlay_scroll_max = usize::MAX;
+        self.notice.clear();
+        self.clear_table_hits();
+    }
+
+    fn back(&mut self) -> Effect {
+        if matches!(self.overlay, Overlay::Output) {
+            if self.output.as_ref().is_some_and(|output| output.running) {
+                return Effect::Cancel;
+            }
+            self.output = None;
+        }
+        self.overlay = self.parents.pop().unwrap_or(Overlay::None);
+        self.overlay_scroll_max = usize::MAX;
+        self.notice.clear();
+        self.clear_table_hits();
+        Effect::Redraw
     }
 
     fn reveal(&mut self, page: usize) {
@@ -281,16 +323,19 @@ impl Dashboard {
     }
 
     fn choose(&mut self, index: usize) -> Effect {
-        match &self.overlay {
-            Overlay::Actions { items, .. } => items
-                .get(index)
-                .copied()
-                .map_or(Effect::Idle, |action| self.activate(action)),
+        match &mut self.overlay {
+            Overlay::Actions { items, cursor } => {
+                let Some(action) = items.get(index).copied() else {
+                    return Effect::Idle;
+                };
+                *cursor = index;
+                self.activate(action)
+            }
             Overlay::Groups { .. } if index <= self.groups.len() => {
                 self.filters.group = index
                     .checked_sub(1)
                     .and_then(|group| self.groups.get(group).cloned());
-                self.overlay = Overlay::None;
+                self.back();
                 self.refilter();
                 Effect::Redraw
             }
@@ -304,7 +349,10 @@ impl Dashboard {
                 self.notice.clear();
                 return Effect::Redraw;
             }
-        } else if self.searching && self.search.edit(key, SEARCH_LIMIT) {
+        } else if self.searching
+            && matches!(self.overlay, Overlay::None)
+            && self.search.edit(key, SEARCH_LIMIT)
+        {
             self.refilter();
             return Effect::Redraw;
         }
@@ -323,6 +371,7 @@ impl Dashboard {
             };
         }
         if self.searching
+            && matches!(self.overlay, Overlay::None)
             && self
                 .search
                 .paste_sanitized(text, SEARCH_LIMIT)
@@ -336,10 +385,12 @@ impl Dashboard {
 
     fn handle(&mut self, event: Event, frame: Option<&Frame>) -> Effect {
         let layout = Layout::new(frame.map_or((80, 20), |frame| frame.size));
-        let page = layout.table.len().max(1);
+        let frame =
+            frame.filter(|_| self.rendered_overlay == Some(std::mem::discriminant(&self.overlay)));
         match event {
-            Event::Key(key) if key.kind != KeyEventKind::Release => self.key(key, page),
+            Event::Key(key) if key.kind != KeyEventKind::Release => self.key(key, &layout),
             Event::Paste(value) => self.paste(&value),
+            Event::FocusLost if self.hover.take().is_some() => Effect::Redraw,
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     let Some(frame) = frame else {
@@ -349,6 +400,11 @@ impl Dashboard {
                         && frame.suggestion_hit(mouse.column, mouse.row).is_some()
                     {
                         return self.confirm();
+                    }
+                    if matches!(self.overlay, Overlay::Details { .. })
+                        && frame.suggestion_hit(mouse.column, mouse.row).is_some()
+                    {
+                        return self.open_actions();
                     }
                     if let Some(hit) = frame
                         .input
@@ -374,24 +430,58 @@ impl Dashboard {
                     }
                     if let Some(index) = frame.menu_hit(mouse.column, mouse.row) {
                         if matches!(self.overlay, Overlay::None) {
+                            if !self.table_hits.contains_row(frame, mouse.column, mouse.row) {
+                                return Effect::Idle;
+                            }
                             self.focus(index);
-                            if frame
-                                .menu
-                                .as_ref()
-                                .is_some_and(|menu| mouse.column < menu.columns.start + 4)
-                            {
+                            if self.table_hits.checkbox.contains(&mouse.column) {
                                 self.toggle(index);
+                            } else if self.table_hits.path.contains(&mouse.column) {
+                                self.hover = self
+                                    .focused()
+                                    .filter(|row| row.path.is_some())
+                                    .map(|row| row.selector.clone());
                             }
                             self.searching = false;
                             return Effect::Redraw;
                         }
-                        return self.choose(index);
+                        let width = unicode_width::UnicodeWidthStr::width(
+                            frame.rows[usize::from(mouse.row)].contents().trim_end(),
+                        );
+                        if usize::from(mouse.column) < width {
+                            return self.choose(index);
+                        }
                     }
-                    if matches!(self.overlay, Overlay::None) && Some(mouse.row) == layout.shortcuts
+                    if matches!(self.overlay, Overlay::None)
+                        && let Some(code) = self.table_hits.shortcut(frame, mouse.column, mouse.row)
                     {
-                        return self.open_actions();
+                        return self.table_shortcut(code, &layout);
                     }
                     Effect::Idle
+                }
+                MouseEventKind::Moved if matches!(self.overlay, Overlay::None) => {
+                    let hover = frame
+                        .filter(|frame| {
+                            self.table_hits.path.contains(&mouse.column)
+                                && self.table_hits.contains_row(frame, mouse.column, mouse.row)
+                        })
+                        .and_then(|frame| frame.menu_hit(mouse.column, mouse.row))
+                        .and_then(|index| self.row(index))
+                        .filter(|row| row.path.is_some())
+                        .map(|row| row.selector.clone());
+                    if self.hover == hover {
+                        return Effect::Idle;
+                    }
+                    self.hover = hover;
+                    Effect::Redraw
+                }
+                MouseEventKind::ScrollLeft => self.scroll_horizontal(-6, &layout),
+                MouseEventKind::ScrollRight => self.scroll_horizontal(6, &layout),
+                MouseEventKind::ScrollUp if mouse.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.scroll_horizontal(-6, &layout)
+                }
+                MouseEventKind::ScrollDown if mouse.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.scroll_horizontal(6, &layout)
                 }
                 MouseEventKind::ScrollUp => self.move_by(-3),
                 MouseEventKind::ScrollDown => self.move_by(3),
@@ -399,6 +489,45 @@ impl Dashboard {
             },
             _ => Effect::Idle,
         }
+    }
+
+    fn command_context(&self, workspace: &Workspace) -> (Vec<String>, Option<String>) {
+        let focused = self.focused();
+        let candidates = focused
+            .into_iter()
+            .chain(self.rows.iter())
+            .flat_map(|row| {
+                let relative = row
+                    .path
+                    .as_deref()
+                    .and_then(|path| path.strip_prefix(&workspace.root).ok())
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .map(|path| path.to_string_lossy().into_owned());
+                [
+                    (!row.selector.starts_with(r"\\?\")).then(|| row.selector.clone()),
+                    row.alias.clone(),
+                    relative,
+                    row.display_path().map(|path| path.into_owned()),
+                ]
+            })
+            .flatten()
+            .collect();
+        (candidates, focused.map(|row| row.selector.clone()))
+    }
+
+    fn scroll_horizontal(&mut self, amount: isize, layout: &Layout) -> Effect {
+        if !matches!(self.overlay, Overlay::None) {
+            return Effect::Idle;
+        }
+        let limit = layout.horizontal_max();
+        let start = self.horizontal.min(limit);
+        let next = start.saturating_add_signed(amount).min(limit);
+        if start == next {
+            return Effect::Idle;
+        }
+        self.horizontal = next;
+        self.clear_table_hits();
+        Effect::Redraw
     }
 
     fn move_by(&mut self, lines: isize) -> Effect {
@@ -411,49 +540,84 @@ impl Dashboard {
             Overlay::Groups { cursor } => {
                 *cursor = cursor.saturating_add_signed(lines).min(self.groups.len())
             }
-            Overlay::Preview { plan, scroll } => {
+            Overlay::Preview { scroll, .. } | Overlay::Details { scroll } => {
                 *scroll = scroll
                     .saturating_add_signed(lines)
-                    .min(plan.labels.len().saturating_sub(1))
-            }
-            Overlay::Details { scroll } => {
-                *scroll = scroll
-                    .saturating_add_signed(lines)
-                    .min(view::DETAIL_ROWS.saturating_sub(1))
+                    .min(self.overlay_scroll_max);
             }
             Overlay::Output => {
                 if let Some(output) = &mut self.output {
                     output.scroll_by(lines);
                 }
             }
-            Overlay::None => self.focus(self.cursor.saturating_add_signed(lines)),
+            Overlay::None => {
+                let next = self
+                    .cursor
+                    .saturating_add_signed(lines)
+                    .min(self.visible.len().saturating_sub(1));
+                if next == self.cursor {
+                    return Effect::Idle;
+                }
+                self.focus(next);
+                self.clear_table_hits();
+            }
             Overlay::Prompt { .. } => return Effect::Idle,
         }
         Effect::Redraw
     }
 
     fn confirm(&mut self) -> Effect {
-        let Overlay::Preview { plan, .. } = std::mem::replace(&mut self.overlay, Overlay::None)
-        else {
+        let Overlay::Preview { plan, .. } = &self.overlay else {
             unreachable!()
         };
         Effect::Run {
-            args: plan.args,
+            args: plan.args.clone(),
             action: plan.action,
         }
     }
 
-    fn key(&mut self, key: KeyEvent, page: usize) -> Effect {
+    fn path_to_copy(&self) -> Option<&Row> {
+        self.hover
+            .as_deref()
+            .and_then(|selector| self.rows.iter().find(|row| row.selector == selector))
+            .or_else(|| self.focused())
+    }
+
+    fn copy_path(&mut self, clipboard: &mut impl Clipboard) -> Effect {
+        self.notice = self.path_to_copy().and_then(Row::display_path).map_or_else(
+            || {
+                tr(
+                    self.vi,
+                    "This repository has no local path.",
+                    "Kho mã này không có đường dẫn cục bộ.",
+                )
+                .into()
+            },
+            |path| match clipboard.set_text(&path) {
+                Ok(()) => tr(
+                    self.vi,
+                    "Repository path copied.",
+                    "Đã sao chép đường dẫn kho mã.",
+                )
+                .into(),
+                Err(error) => format!(
+                    "{} ({error})",
+                    tr(
+                        self.vi,
+                        "Clipboard unavailable",
+                        "Không thể dùng bảng nhớ tạm"
+                    )
+                ),
+            },
+        );
+        Effect::Redraw
+    }
+
+    fn key(&mut self, key: KeyEvent, layout: &Layout) -> Effect {
+        let page = layout.table.len().max(1);
         if key.code == KeyCode::Esc || control(key, 'c') {
-            if matches!(self.overlay, Overlay::Output)
-                && self.output.as_ref().is_some_and(|output| output.running)
-            {
-                return Effect::Cancel;
-            }
             if !matches!(self.overlay, Overlay::None) {
-                self.overlay = Overlay::None;
-                self.notice.clear();
-                return Effect::Redraw;
+                return self.back();
             }
             if self.searching {
                 self.searching = false;
@@ -462,7 +626,8 @@ impl Dashboard {
             return Effect::Exit;
         }
         if control(key, 'v')
-            && (self.searching || matches!(self.overlay, Overlay::Prompt { .. }))
+            && ((self.searching && matches!(self.overlay, Overlay::None))
+                || matches!(self.overlay, Overlay::Prompt { .. }))
             && let Ok(value) = SystemClipboard.get_text()
         {
             return self.paste(&value);
@@ -483,6 +648,26 @@ impl Dashboard {
                 KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {}
                 _ => return self.edit(key),
             }
+        }
+        if key.kind == KeyEventKind::Press
+            && super::text_modifiers(key)
+            && (key.code == KeyCode::Char(':')
+                || key.code == KeyCode::Char(';') && key.modifiers.contains(KeyModifiers::SHIFT))
+            && matches!(
+                self.overlay,
+                Overlay::None
+                    | Overlay::Details { .. }
+                    | Overlay::Actions { .. }
+                    | Overlay::Groups { .. }
+            )
+        {
+            return Effect::CommandPrompt;
+        }
+        if super::text_modifiers(key)
+            && key.code == KeyCode::Char('c')
+            && matches!(self.overlay, Overlay::None | Overlay::Details { .. })
+        {
+            return self.copy_path(&mut SystemClipboard);
         }
         match key.code {
             KeyCode::Up => return self.move_by(-1),
@@ -506,7 +691,12 @@ impl Dashboard {
             {
                 return self.confirm();
             }
-            Overlay::Details { .. } if matches!(key.code, KeyCode::Char('a') | KeyCode::Enter) => {
+            Overlay::Details { .. }
+                if matches!(
+                    key.code,
+                    KeyCode::Char('a') | KeyCode::Enter | KeyCode::F(2)
+                ) =>
+            {
                 return self.open_actions();
             }
             Overlay::None => {}
@@ -527,11 +717,35 @@ impl Dashboard {
         if !super::text_modifiers(key) {
             return Effect::Idle;
         }
-        match key.code {
+        self.table_shortcut(key.code, layout)
+    }
+
+    fn table_shortcut(&mut self, code: KeyCode, layout: &Layout) -> Effect {
+        match code {
             KeyCode::Char('q') => return Effect::Exit,
+            KeyCode::Esc if self.searching => self.searching = false,
+            KeyCode::Esc => return Effect::Exit,
+            KeyCode::Char(':') => return Effect::CommandPrompt,
+            KeyCode::Char('c') => return self.copy_path(&mut SystemClipboard),
             KeyCode::Char(' ') => self.toggle(self.cursor),
+            KeyCode::Left => return self.scroll_horizontal(-6, layout),
+            KeyCode::Right => return self.scroll_horizontal(6, layout),
+            KeyCode::Char('p') => {
+                self.hover = None;
+                self.path_focus = !self.path_focus;
+                self.notice.clear();
+                if self.path_focus && self.focused().is_none_or(|row| row.path.is_none()) {
+                    self.notice = tr(
+                        self.vi,
+                        "This repository has no local path.",
+                        "Kho mã này không có đường dẫn cục bộ.",
+                    )
+                    .into();
+                }
+            }
             KeyCode::Char('/') | KeyCode::Tab => {
                 self.notice.clear();
+                self.hover = None;
                 self.searching = true;
             }
             KeyCode::Char('g') => {
@@ -541,18 +755,14 @@ impl Dashboard {
                     .as_ref()
                     .and_then(|group| self.groups.iter().position(|name| name == group))
                     .map_or(0, |index| index + 1);
-                self.overlay = Overlay::Groups { cursor };
-            }
-            KeyCode::Char('s') => {
-                self.filters.sort = self.filters.sort.next();
-                self.refilter();
+                self.push_overlay(Overlay::Groups { cursor });
             }
             KeyCode::F(5) => return Effect::Refresh,
             KeyCode::F(2) | KeyCode::Char('a') => return self.open_actions(),
             KeyCode::Char('t') if !self.update_only => return self.activate(Action::Terminal),
             KeyCode::Enter if self.update_only => return self.activate(Action::Update),
             KeyCode::Enter | KeyCode::Char('d') if self.focused().is_some() => {
-                self.overlay = Overlay::Details { scroll: 0 }
+                self.push_overlay(Overlay::Details { scroll: 0 })
             }
             _ => return Effect::Idle,
         }
@@ -613,6 +823,7 @@ pub(super) fn open(
     update: bool,
     sessions: &mut Manager,
     vi: bool,
+    history: &mut History,
 ) -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!(
@@ -624,6 +835,20 @@ pub(super) fn open(
             )
         );
     }
+    let mut prompt = RepositoryPrompt::new(vi, history);
+    let result = drive(workspace, flags, update, sessions, vi, &mut prompt);
+    prompt.finish(history);
+    result
+}
+
+fn drive(
+    workspace: &Workspace,
+    flags: &ArgMatches,
+    update: bool,
+    sessions: &mut Manager,
+    vi: bool,
+    prompt: &mut RepositoryPrompt,
+) -> Result<()> {
     let mut dashboard = Dashboard::new(vi, update);
     dashboard.update_jobs = flags
         .subcommand_matches("repos")
@@ -641,6 +866,7 @@ pub(super) fn open(
     let mut redraw = true;
     let mut batch = Vec::with_capacity(128);
     let mut paste_continuation = 0;
+    let mut rendered_prompt = false;
     'dashboard: loop {
         if scanner.as_ref().is_some_and(JoinHandle::is_finished) {
             let result = scanner.take().expect("finished scan").join().map_err(|_| {
@@ -699,7 +925,13 @@ pub(super) fn open(
                 Ok((key, directory, shell)) => {
                     dashboard.notice.clear();
                     drop(screen);
-                    let result = sessions.open(&key, &directory, shell.as_deref(), vi);
+                    let result = sessions.open_with_repositories(
+                        (&key, &directory, shell.as_deref()),
+                        workspace,
+                        flags,
+                        Some(&dashboard.rows),
+                        vi,
+                    );
                     screen = Screen::enter(io::BufWriter::with_capacity(
                         64 * 1024,
                         io::stdout().lock(),
@@ -738,14 +970,23 @@ pub(super) fn open(
             scanner = Some(scan(workspace, flags, false));
             redraw = true;
         }
+        redraw |= prompt.poll()?;
         if redraw {
-            painter.draw(&mut screen.out, dashboard.frame(size), color)?;
+            let frame = dashboard.frame(size);
+            rendered_prompt = prompt.active();
+            let frame = if rendered_prompt {
+                prompt.frame(frame, color)
+            } else {
+                frame
+            };
+            painter.draw(&mut screen.out, frame, color)?;
         }
-        let timeout = if running.is_some() || scanner.is_some() || context.is_some() {
-            Some(Duration::from_millis(50))
-        } else {
-            cfg!(windows).then_some(Duration::from_millis(160))
-        };
+        let timeout =
+            if running.is_some() || scanner.is_some() || context.is_some() || prompt.polling() {
+                Some(Duration::from_millis(50))
+            } else {
+                cfg!(windows).then_some(Duration::from_millis(160))
+            };
         read_events(&mut batch, timeout)?;
         redraw = false;
         if cfg!(windows) || batch.iter().any(|event| matches!(event, Event::Resize(..))) {
@@ -757,7 +998,9 @@ pub(super) fn open(
         }
         let previous_text = std::mem::take(&mut paste_continuation);
         if cfg!(windows)
-            && (dashboard.searching || matches!(dashboard.overlay, Overlay::Prompt { .. }))
+            && (prompt.active()
+                || dashboard.searching && matches!(dashboard.overlay, Overlay::None)
+                || matches!(dashboard.overlay, Overlay::Prompt { .. }))
         {
             if batch.len() == 128 {
                 paste_continuation = previous_text + batch.iter().filter(|event| {
@@ -765,7 +1008,11 @@ pub(super) fn open(
                 }).count();
             }
             if let Some(paste) = super::windows_paste(&batch, previous_text) {
-                redraw |= matches!(dashboard.paste(&paste), Effect::Redraw);
+                redraw |= if prompt.active() {
+                    matches!(prompt.paste(&paste, true), PromptEvent::Redraw)
+                } else {
+                    matches!(dashboard.paste(&paste), Effect::Redraw)
+                };
                 continue;
             }
         }
@@ -775,10 +1022,38 @@ pub(super) fn open(
             if super::skip_paste_companion(&event, host_paste, &mut pasted) {
                 continue;
             }
-            match dashboard.handle(event, painter.last_frame(size)) {
+            let frame = painter
+                .last_frame(size)
+                .filter(|_| prompt.active() == rendered_prompt);
+            let effect = if prompt.active() {
+                match prompt.event(event, frame, workspace, flags)? {
+                    PromptEvent::Idle => Effect::Idle,
+                    PromptEvent::Redraw => Effect::Redraw,
+                    PromptEvent::Closed { refresh } => {
+                        refresh_pending |= refresh;
+                        Effect::Redraw
+                    }
+                    PromptEvent::Terminal {
+                        selector,
+                        shell,
+                        refresh,
+                    } => {
+                        refresh_pending |= refresh;
+                        Effect::Terminal { selector, shell }
+                    }
+                }
+            } else {
+                dashboard.handle(event, frame)
+            };
+            match effect {
                 Effect::Idle => {}
                 Effect::Redraw => redraw = true,
                 Effect::Exit => break 'dashboard,
+                Effect::CommandPrompt => {
+                    let (selectors, focused) = dashboard.command_context(workspace);
+                    prompt.open_on(selectors, focused);
+                    redraw = true;
+                }
                 Effect::Cancel => {
                     if let Some((runner, _)) = &mut running {
                         dashboard.notice = runner.cancel().err().map_or_else(
@@ -805,10 +1080,10 @@ pub(super) fn open(
                         Err(error) => output.finish(Err(format!("{error:#}")), vi),
                     }
                     dashboard.output = Some(output);
-                    dashboard.overlay = Overlay::Output;
+                    dashboard.push_overlay(Overlay::Output);
                     redraw = true;
                 }
-                Effect::Terminal(selector) => {
+                Effect::Terminal { selector, shell } => {
                     if context.is_none() {
                         let workspace = Workspace {
                             root: workspace.root.clone(),
@@ -816,6 +1091,7 @@ pub(super) fn open(
                         let flags = flags.clone();
                         context = Some(thread::spawn(move || {
                             terminal_context(&workspace, &flags, &selector)
+                                .map(|(key, path, configured)| (key, path, shell.or(configured)))
                         }));
                         dashboard.notice = tr(
                             vi,

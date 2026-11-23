@@ -104,7 +104,11 @@ Dùng `--yes` để xác nhận clone, thêm hoặc gỡ hàng loạt sau khi xe
 | `cnl repos branch <REPO> <BRANCH> [--switch]` · `cnl repos worktree <REPO> <PATH> --branch <BRANCH>` | Tạo hoặc chuyển nhánh, hoặc thêm worktree cho nhánh có sẵn. |
 | `cnl repos stage <REPO> <PATH>...` · `cnl repos commit <REPO> -m <MESSAGE>` · `cnl repos push <REPO>` | Stage đường dẫn chỉ định, commit phần đã stage hoặc push nhánh theo dõi. Bạn phải gọi rõ từng lệnh. |
 
-Trong bảng quản lý, dùng `/` để tìm, Space để chọn, `G` để lọc nhóm, `S` để sắp xếp, `A` để mở thao tác và `T` để mở terminal của repo hiện tại. Kiểm tra danh sách rồi nhấn `Y` để xác nhận thay đổi. Trong shell, dùng F6 và F7 để chuyển phiên, F8 để đóng, F9 để khởi động lại và F10 để trở về bảng quản lý. Phiên tạm rời vẫn chạy đến khi bạn đóng phiên hoặc thoát trình quản lý.
+Bảng quản lý hiển thị nhánh và trạng thái upstream đã kiểm chứng cùng mã commit rút gọn. Mở Chi tiết hoặc Lịch sử để xem thông tin commit. Dùng `/` để tìm, Space để chọn và `G` để lọc nhóm. Phím trái và phải cuộn bảng theo chiều ngang. Rê chuột lên ô đường dẫn hoặc nhấn `P` để xem đường dẫn đầy đủ. Nhấn `C` để sao chép đường dẫn. Dùng `A` để mở thao tác, kiểm tra danh sách rồi nhấn `Y` để xác nhận. Esc quay về màn hình trước.
+
+Nhấn `:` để mở ô lệnh CNL dùng chung lịch sử, gợi ý và điều khiển kết quả với terminal chính. Nhấn `T` để mở terminal của repo đang có tiêu điểm.
+
+Trong terminal, nhấn F1 để mở phiên mới, F2 để đổi tên hiển thị, F3 để chia hoặc gộp khung, F4 để xem danh sách phiên và F5 để mở các thao tác như Di chuyển và Nhân bản. F6 và F7 chuyển phiên. F8 đóng phiên đang chọn, F9 khởi động lại và F10 quay về bảng quản lý. Phiên shell vẫn giữ trạng thái khi bạn quay về bảng quản lý. Nhân bản mở shell mới tại cùng thư mục ban đầu.
 
 ### Tùy chọn khởi động cho `run` và `dev`
 

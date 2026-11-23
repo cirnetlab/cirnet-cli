@@ -18,6 +18,7 @@
 - Add local Git and native shell suggestions, responsive layouts and a reduced-motion-aware input border.
 - Soften the copper input border sweep and pause its motion while editing.
 - Add a workspace repository registry, cached GitHub discovery, parallel Git synchronization, and a dashboard with persistent repository terminals.
+- Show verified Git metadata and readable paths in Repository Manager. Add hierarchical navigation, shared CNL command entry, and a split terminal workspace with a session list.
 
 ### Tiếng Việt
 
@@ -35,3 +36,4 @@
 - Bổ sung gợi ý Git và shell native từ dữ liệu cục bộ, bố cục linh hoạt và hiệu ứng viền ô nhập có thể tắt.
 - Làm dịu dải sáng màu đồng trên viền ô nhập và tạm dừng hiệu ứng khi chỉnh sửa.
 - Thêm danh bạ repo theo workspace, khám phá GitHub qua cache, đồng bộ Git song song và bảng quản lý có terminal riêng cho từng repo.
+- Hiển thị dữ liệu Git đã kiểm chứng và đường dẫn dễ đọc trong trình quản lý repo. Thêm điều hướng theo cấp, ô lệnh CNL dùng chung và terminal chia khung với danh sách phiên.

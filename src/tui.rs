@@ -7,6 +7,7 @@ mod highlight;
 mod history;
 mod interaction;
 mod repositories;
+mod repository_prompt;
 mod runner;
 mod sessions;
 mod terminal;
@@ -1279,14 +1280,16 @@ fn show(
                             update,
                             &mut sessions,
                             menu.vi,
+                            &mut menu.history,
                         ),
                         Effect::RepositoryTerminal(selector, shell) => {
                             management::terminal_context(workspace, &localized, &selector).and_then(
                                 |(key, path, preferred)| {
-                                    sessions.open(
-                                        &key,
-                                        &path,
-                                        shell.as_deref().or(preferred.as_deref()),
+                                    sessions.open_with_repositories(
+                                        (&key, &path, shell.as_deref().or(preferred.as_deref())),
+                                        workspace,
+                                        &localized,
+                                        None,
                                         menu.vi,
                                     )
                                 },
@@ -1372,13 +1375,17 @@ pub(crate) fn open_repositories(
     let vi = flags
         .get_one::<String>("lang")
         .is_some_and(|lang| lang == "vi");
-    repositories::open(
+    let (mut history, state) = load_history(workspace, flags)?;
+    let result = repositories::open(
         workspace,
         flags,
         update,
         &mut sessions::Manager::default(),
         vi,
-    )
+        &mut history,
+    );
+    save_history(&history, state.as_deref())?;
+    result
 }
 
 pub(crate) fn open_repository_terminal(
@@ -1392,7 +1399,13 @@ pub(crate) fn open_repository_terminal(
         .get_one::<String>("lang")
         .is_some_and(|lang| lang == "vi");
     let (key, path, preferred) = management::terminal_context(workspace, flags, selector)?;
-    sessions::Manager::default().open(&key, &path, shell.or(preferred.as_deref()), vi)
+    sessions::Manager::default().open_with_repositories(
+        (&key, &path, shell.or(preferred.as_deref())),
+        workspace,
+        flags,
+        None,
+        vi,
+    )
 }
 
 fn native_shell_request(args: &[String]) -> Option<Option<String>> {
@@ -1415,25 +1428,35 @@ pub fn open(workspace: &Workspace, flags: &ArgMatches) -> anyhow::Result<()> {
         .get_one::<String>("lang")
         .is_some_and(|language| language == "vi");
     let mut menu = Menu::new(vi);
-    let history_state = if flags.get_flag("persist-history") {
-        Some(crate::environment::State::resolve(
-            workspace,
-            flags
-                .get_one::<std::path::PathBuf>("state-dir")
-                .map(std::path::PathBuf::as_path),
-            flags.get_one::<String>("profile").expect("default profile"),
-        )?)
-    } else {
-        None
-    };
-    if let Some(state) = &history_state {
-        menu.history = History::load(&state.dir).map_err(|_| {
-            anyhow::anyhow!("{}", localization::message(labels::HISTORY_READ_FAILED))
-        })?;
+    let (history, state) = load_history(workspace, flags)?;
+    menu.history = history;
+    let result = show(&mut menu, terminal::color_enabled(), true, workspace, flags);
+    save_history(&menu.history, state.as_deref())?;
+    Ok(result?)
+}
+
+fn load_history(
+    workspace: &Workspace,
+    flags: &ArgMatches,
+) -> anyhow::Result<(History, Option<std::path::PathBuf>)> {
+    if !flags.get_flag("persist-history") {
+        return Ok((History::default(), None));
     }
-    show(&mut menu, terminal::color_enabled(), true, workspace, flags)?;
-    if let Some(state) = &history_state {
-        menu.history.save(&state.dir).map_err(|_| {
+    let state = crate::environment::State::resolve(
+        workspace,
+        flags
+            .get_one::<std::path::PathBuf>("state-dir")
+            .map(std::path::PathBuf::as_path),
+        flags.get_one::<String>("profile").expect("default profile"),
+    )?;
+    let history = History::load(&state.dir)
+        .map_err(|_| anyhow::anyhow!("{}", localization::message(labels::HISTORY_READ_FAILED)))?;
+    Ok((history, Some(state.dir)))
+}
+
+fn save_history(history: &History, state: Option<&std::path::Path>) -> anyhow::Result<()> {
+    if let Some(state) = state {
+        history.save(state).map_err(|_| {
             anyhow::anyhow!("{}", localization::message(labels::HISTORY_WRITE_FAILED))
         })?;
     }

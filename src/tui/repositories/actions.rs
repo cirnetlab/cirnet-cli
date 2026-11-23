@@ -165,13 +165,14 @@ impl Action {
     }
 
     fn applies_to(self, row: &Row) -> bool {
-        let checkout = row.path.is_some() && !matches!(row.state.as_str(), "missing" | "invalid");
+        let checkout = row.path.is_some()
+            && !matches!(row.state.as_str(), "missing" | "invalid" | "inaccessible");
         match self {
             Self::Register => !row.registered && row.state == "available",
             Self::Clone => matches!(row.state.as_str(), "available" | "uncloned" | "missing"),
             Self::Add => checkout && !row.registered,
             Self::Remove | Self::GroupAdd | Self::GroupRemove => row.registered,
-            Self::Switch => checkout && row.registered,
+            Self::Switch => checkout && row.registered && row.linked,
             Self::Status => true,
             _ => checkout,
         }
@@ -198,6 +199,7 @@ impl Action {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Target {
     pub(super) selector: String,
     pub(super) label: String,
@@ -206,9 +208,7 @@ pub(super) struct Target {
 impl From<&Row> for Target {
     fn from(row: &Row) -> Self {
         let identity = row
-            .path
-            .as_deref()
-            .map(std::path::Path::to_string_lossy)
+            .display_path()
             .or_else(|| row.remote.as_deref().map(Into::into));
         let label = identity
             .as_deref()
@@ -232,7 +232,6 @@ pub(super) struct Plan {
 
 impl Dashboard {
     pub(super) fn open_actions(&mut self) -> Effect {
-        self.searching = false;
         let grammar = completion::grammar().find_subcommand("repos");
         let targets = self.targets();
         let focused = self.focused();
@@ -247,23 +246,22 @@ impl Dashboard {
                         || if action.per_focus() {
                             focused.is_some_and(|row| action.applies_to(row))
                         } else {
-                            targets.iter().any(|row| action.applies_to(row))
+                            !targets.is_empty() && targets.iter().all(|row| action.applies_to(row))
                         })
             })
             .collect();
-        self.overlay = Overlay::Actions { items, cursor: 0 };
+        self.push_overlay(Overlay::Actions { items, cursor: 0 });
         Effect::Redraw
     }
 
     pub(super) fn activate(&mut self, action: Action) -> Effect {
-        self.overlay = Overlay::None;
         self.notice.clear();
         let targets = if action.without_targets() {
             Vec::new()
         } else if action.per_focus() {
-            self.focused().map(Target::from).into_iter().collect()
+            self.focused().into_iter().collect()
         } else {
-            self.targets().into_iter().map(Target::from).collect()
+            self.targets()
         };
         if !action.without_targets() && targets.is_empty() {
             self.notice = tr(
@@ -274,21 +272,32 @@ impl Dashboard {
             .into();
             return Effect::Redraw;
         }
+        if targets.iter().any(|row| !action.applies_to(row)) {
+            self.notice = tr(
+                self.vi,
+                "This action cannot run on all selected repositories.",
+                "Không thể thực hiện thao tác này trên tất cả kho mã đã chọn.",
+            )
+            .into();
+            return Effect::Redraw;
+        }
+        let targets: Vec<_> = targets.into_iter().map(Target::from).collect();
         if action == Action::Terminal {
-            return Effect::Terminal(
-                targets
+            return Effect::Terminal {
+                selector: targets
                     .into_iter()
                     .next()
                     .expect("selected target")
                     .selector,
-            );
+                shell: None,
+            };
         }
         if action.prompt(self.vi).is_some() {
-            self.overlay = Overlay::Prompt {
+            self.push_overlay(Overlay::Prompt {
                 action,
                 targets,
                 input: Input::default(),
-            };
+            });
             return Effect::Redraw;
         }
         self.prepare(action, targets, Vec::new())
@@ -334,14 +343,14 @@ impl Dashboard {
             }
         }
         if action.needs_preview() {
-            self.overlay = Overlay::Preview {
+            self.push_overlay(Overlay::Preview {
                 plan: Plan {
                     action,
                     args,
                     labels,
                 },
                 scroll: 0,
-            };
+            });
             Effect::Redraw
         } else {
             Effect::Run { args, action }
@@ -349,7 +358,12 @@ impl Dashboard {
     }
 
     pub(super) fn submit_prompt(&mut self) -> Effect {
-        let Overlay::Prompt { action, input, .. } = &self.overlay else {
+        let Overlay::Prompt {
+            action,
+            input,
+            targets,
+        } = &self.overlay
+        else {
             return Effect::Idle;
         };
         let action = *action;
@@ -379,10 +393,7 @@ impl Dashboard {
             .into();
             return Effect::Redraw;
         }
-        let Overlay::Prompt { targets, .. } = std::mem::replace(&mut self.overlay, Overlay::None)
-        else {
-            unreachable!()
-        };
+        let targets = targets.clone();
         self.notice.clear();
         self.prepare(action, targets, inputs)
     }

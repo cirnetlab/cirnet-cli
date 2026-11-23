@@ -73,7 +73,7 @@ fn porcelain_reports_worktree_changes_and_detached_head() {
     let checkout = inspect(&fixture.0, "origin").unwrap();
     assert_eq!(checkout.status, GitStatus::Detached);
     assert!(checkout.branch.is_none());
-    assert!(checkout.last_commit.unwrap().contains("initial"));
+    assert!(checkout.commit.unwrap().message.contains("initial"));
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn clone_service_reserves_exact_directory_and_verifies_the_created_checkout() {
         Ok(())
     })
     .unwrap();
-    assert!(checkout.last_commit.unwrap().contains("initial"));
+    assert!(checkout.commit.unwrap().message.contains("initial"));
     assert!(!fixture.0.join("fixture-upstream.git").exists());
 }
 

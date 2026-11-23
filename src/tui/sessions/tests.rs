@@ -1,9 +1,10 @@
 use super::*;
+use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 use std::{
     fs,
     path::PathBuf,
     process::Command,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 struct Repos(PathBuf);
@@ -40,10 +41,14 @@ impl Drop for Repos {
 }
 
 fn output_contains(session: &Session, wanted: &str) {
+    output_matches(session, wanted, |output| output.contains(wanted));
+}
+
+fn output_matches(session: &Session, wanted: &str, matches: impl Fn(&str) -> bool) {
     let timeout = Instant::now() + Duration::from_secs(10);
     loop {
         let output = session.output.lock().unwrap().parser.screen().contents();
-        if output.contains(wanted) {
+        if matches(&output) {
             return;
         }
         assert!(Instant::now() < timeout, "missing {wanted:?}: {output:?}");
@@ -63,8 +68,8 @@ fn wait_until(mut observed: impl FnMut() -> bool) {
 fn interactive_shells_keep_working_directories_and_environment_isolated() {
     let repos = Repos::new();
     let shell = if cfg!(windows) { "cmd" } else { "bash" };
-    let first = crate::workspace::canonical(&repos.0.join("fixture-one")).unwrap();
-    let second = crate::workspace::canonical(&repos.0.join("fixture-two")).unwrap();
+    let first = fs::canonicalize(repos.0.join("fixture-one")).unwrap();
+    let second = fs::canonicalize(repos.0.join("fixture-two")).unwrap();
     let mut manager = Manager::default();
     let size = pty_size((100, 28));
     let index = manager
@@ -148,7 +153,7 @@ fn terminal_replies_are_routed_to_the_child() {
 #[test]
 fn running_shell_observes_resize_and_reports_exit_code() {
     let repos = Repos::new();
-    let repo = crate::workspace::canonical(&repos.0.join("fixture-one")).unwrap();
+    let repo = fs::canonicalize(repos.0.join("fixture-one")).unwrap();
     let shell = if cfg!(windows) { "cmd" } else { "bash" };
     let mut session =
         Session::start("org/one", &repo, Some(shell), pty_size((85, 26)), false).unwrap();
@@ -165,7 +170,7 @@ fn running_shell_observes_resize_and_reports_exit_code() {
         "stty size\r"
     };
     assert!(session.send(command.as_bytes().to_vec()));
-    output_contains(&session, if cfg!(windows) { "112" } else { "28 112" });
+    output_contains(&session, if cfg!(windows) { "112" } else { "31 112" });
     assert!(session.send(b"exit 7\r".to_vec()));
     wait_until(|| {
         let output = session.output.lock().unwrap();
@@ -174,4 +179,312 @@ fn running_shell_observes_resize_and_reports_exit_code() {
             .as_ref()
             .is_some_and(|code| code.as_ref().unwrap().exit_code() == 7)
     });
+}
+
+#[test]
+fn workspace_reflows_split_and_compact_sidebar_without_changing_focus() {
+    use super::layout::{Arrangement, Layout, Sidebar};
+
+    let mut arrangement = Arrangement::default();
+    arrangement.activate(1);
+    arrangement.split(2);
+    assert_eq!(arrangement.active(), Some(2));
+    let wide = Layout::new((120, 28), &arrangement);
+    let first = wide.panes[0].unwrap();
+    let second = wide.panes[1].unwrap();
+    let sidebar = wide.sidebar.unwrap();
+    assert_eq!(first.body.y, second.body.y);
+    assert_eq!(second.body.x, first.body.x + first.body.width + 1);
+    assert_eq!(sidebar.x, second.body.x + second.body.width + 1);
+
+    let narrow = Layout::new((60, 28), &arrangement);
+    assert!(narrow.sidebar.is_none());
+    assert_eq!(narrow.panes[0].unwrap().body.width, 60);
+    assert!(narrow.panes[0].unwrap().body.y < narrow.panes[1].unwrap().body.y);
+
+    let tiny = Layout::new((24, 6), &arrangement);
+    assert!(tiny.panes[0].is_none());
+    assert_eq!(tiny.panes[1].unwrap().id, 2);
+    assert_eq!(arrangement.active(), Some(2));
+
+    arrangement.sidebar = Sidebar::Visible;
+    arrangement.sidebar_focused = true;
+    let picker = Layout::new((24, 8), &arrangement);
+    assert_eq!(picker.sidebar.unwrap().width, 24);
+    assert!(picker.panes.iter().all(Option::is_none));
+}
+
+#[test]
+fn moving_session_swaps_visible_panes_without_changing_active_identity() {
+    use super::layout::Arrangement;
+    let mut arrangement = Arrangement::default();
+    arrangement.activate(1);
+    arrangement.split(2);
+    arrangement.move_pane();
+    assert_eq!(arrangement.panes, [Some(2), Some(1)]);
+    assert_eq!(arrangement.active(), Some(2));
+    arrangement.activate(3);
+    assert_eq!(arrangement.panes, [Some(3), Some(1)]);
+    arrangement.close(3, Some(2));
+    assert_eq!(arrangement.active(), Some(1));
+    assert_eq!(arrangement.panes, [Some(1), None]);
+}
+
+#[test]
+fn pane_mouse_coordinates_are_relative_to_its_actual_origin() {
+    use crossterm::event::{MouseButton, MouseEvent};
+
+    let mut output = Output::new(pty_size((30, 10)));
+    output.parser.process(b"\x1b[?1000h\x1b[?1006h");
+    let mouse = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 51,
+        row: 7,
+        modifiers: KeyModifiers::NONE,
+    };
+    let screen = output.parser.screen();
+    assert_eq!(
+        mouse_bytes(mouse, screen, (48, 5)).unwrap(),
+        b"\x1b[<0;4;3M"
+    );
+    assert_eq!(mouse_bytes(mouse, screen, (52, 5)), None);
+    assert_eq!(mouse_bytes(mouse, screen, (48, 8)), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() {
+    use crossterm::event::MouseButton;
+    use std::sync::mpsc::{Receiver, sync_channel};
+    use windows_sys::Win32::{
+        Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+    };
+
+    use super::{
+        render,
+        workspace::{Catalog, Command as Control, Modal, State, WorkspaceEvent},
+    };
+
+    fn finish_job(state: &mut State, manager: &mut Manager, receiver: &Receiver<WorkspaceEvent>) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let event = receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("terminal operation finished");
+            if let WorkspaceEvent::Job(result) = event {
+                assert!(result.is_ok(), "{:#}", result.as_ref().err().unwrap());
+                state.complete(manager, result);
+                return;
+            }
+        }
+    }
+
+    fn key(state: &mut State, manager: &mut Manager, key: KeyCode) {
+        let layout = Layout::new(state.size, &manager.arrangement);
+        assert!(!state.key(manager, &layout, KeyEvent::new(key, KeyModifiers::NONE)));
+    }
+
+    fn send(state: &mut State, manager: &mut Manager, command: &str) {
+        state.paste(
+            manager,
+            &Layout::new(state.size, &manager.arrangement),
+            command.to_owned(),
+        );
+        assert!(state.notice.is_none(), "{:?}", state.notice);
+        key(state, manager, KeyCode::Enter);
+    }
+
+    fn witness(session: &Session) -> std::os::windows::io::OwnedHandle {
+        use std::os::windows::io::FromRawHandle;
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, session.backend.process_id) };
+        assert!(!handle.is_null());
+        unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle) }
+    }
+
+    fn process_state(handle: &std::os::windows::io::OwnedHandle, wait_ms: u32) -> u32 {
+        use std::os::windows::io::AsRawHandle;
+        unsafe { WaitForSingleObject(handle.as_raw_handle(), wait_ms) }
+    }
+
+    let repos = Repos::new();
+    let workspace = Workspace {
+        root: repos.0.clone(),
+    };
+    let flags = crate::cli::app().get_matches_from([
+        std::ffi::OsStr::new("cnl"),
+        std::ffi::OsStr::new("--state-dir"),
+        repos.0.join("state").as_os_str(),
+    ]);
+    let rows: Vec<_> = ["fixture-one", "fixture-two"]
+        .into_iter()
+        .map(|name| {
+            let path = fs::canonicalize(repos.0.join(name)).unwrap();
+            Row {
+                name: name.into(),
+                selector: crate::workspace::user_path(&path).into_owned(),
+                path: Some(path),
+                shell: Some("cmd".into()),
+                ..Row::default()
+            }
+        })
+        .collect();
+    let (events, receiver) = sync_channel(128);
+    let mut state = State::new(
+        (125, 30),
+        Catalog::new(&workspace, &flags, Some(&rows)),
+        false,
+        events,
+    );
+    let mut manager = Manager::default();
+
+    key(&mut state, &mut manager, KeyCode::F(1));
+    finish_job(&mut state, &mut manager, &receiver);
+    assert!(matches!(state.modal, Some(Modal::Repositories { .. })));
+    key(&mut state, &mut manager, KeyCode::Down);
+    key(&mut state, &mut manager, KeyCode::Enter);
+    assert!(matches!(state.modal, Some(Modal::Shells { .. })));
+    key(&mut state, &mut manager, KeyCode::Enter);
+    finish_job(&mut state, &mut manager, &receiver);
+    let original = manager.active().unwrap().id;
+    let original_process = witness(manager.active().unwrap());
+    assert_eq!(
+        manager.active().unwrap().cwd,
+        *rows[1].path.as_ref().unwrap()
+    );
+    assert_eq!(manager.active().unwrap().shell, "cmd");
+    let cwd = manager.active().unwrap().cwd.clone();
+    assert_eq!(
+        manager
+            .attach(
+                "other selector",
+                &cwd,
+                Some("cmd"),
+                pty_size(state.size),
+                false
+            )
+            .unwrap(),
+        0,
+    );
+    send(&mut state, &mut manager, "cd");
+    let expected = crate::workspace::user_path(&cwd);
+    output_matches(manager.active().unwrap(), &expected, |output| {
+        output
+            .lines()
+            .any(|line| line.trim().eq_ignore_ascii_case(&expected))
+    });
+    send(&mut state, &mut manager, "set CNL_SPLIT_CHECK=original");
+
+    key(&mut state, &mut manager, KeyCode::F(3));
+    finish_job(&mut state, &mut manager, &receiver);
+    let split = manager.active().unwrap().id;
+    assert_ne!(split, original);
+    let size = (124, 28);
+    state.size = size;
+    let layout = Layout::new(size, &manager.arrangement);
+    manager.resize_visible(&layout);
+    let first = layout.pane(original).unwrap();
+    let second = layout.pane(split).unwrap();
+    assert_ne!(first.body.width, second.body.width);
+    for pane in [first, second] {
+        let entry = manager.session(pane.id).unwrap();
+        wait_until(|| {
+            entry.output.lock().unwrap().parser.screen().size() == dimensions(pane.size())
+        });
+    }
+    send(
+        &mut state,
+        &mut manager,
+        "if not defined CNL_SPLIT_CHECK echo SPLIT:em^pty",
+    );
+    output_contains(manager.session(split).unwrap(), "SPLIT:empty");
+
+    let (frame, hits) = render::frame(&manager, &layout, &state);
+    let sidebar = layout.sidebar.unwrap();
+    let heading = frame.rows[usize::from(sidebar.y)].contents();
+    assert!(heading.contains("SESSIONS"));
+    assert!(!heading.contains(&rows[1].selector));
+    assert_eq!(
+        hits.at(sidebar.x, sidebar.y + 1),
+        Some(render::Hit::Session(original))
+    );
+    assert!(!state.mouse(
+        &mut manager,
+        &layout,
+        &hits,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: first.body.x + 2,
+            row: first.body.y + 1,
+            modifiers: KeyModifiers::NONE,
+        },
+    ));
+    assert_eq!(manager.active().unwrap().id, original);
+    send(&mut state, &mut manager, "echo CHECK:[%CNL_SPLIT_CHECK%]");
+    output_contains(manager.session(original).unwrap(), "CHECK:[original]");
+
+    state.command(&mut manager, Control::MovePane);
+    state.command(&mut manager, Control::MoveDown);
+    assert_eq!(manager.arrangement.panes, [Some(split), Some(original)]);
+    assert_eq!(
+        manager
+            .entries
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        [split, original]
+    );
+    assert_eq!(process_state(&original_process, 0), WAIT_TIMEOUT);
+
+    key(&mut state, &mut manager, KeyCode::F(2));
+    send(&mut state, &mut manager, "Kiểm tra 界");
+    assert_eq!(manager.active().unwrap().title(), "Kiểm tra 界");
+    assert_eq!(manager.active().unwrap().repository, "fixture-two");
+    assert_eq!(
+        manager.active().unwrap().cwd,
+        *rows[1].path.as_ref().unwrap()
+    );
+
+    state.command(&mut manager, Control::Duplicate);
+    finish_job(&mut state, &mut manager, &receiver);
+    let duplicate = manager.active().unwrap().id;
+    let duplicate_process = witness(manager.active().unwrap());
+    assert_ne!(duplicate, original);
+    assert_eq!(
+        manager.active().unwrap().cwd,
+        *rows[1].path.as_ref().unwrap()
+    );
+    assert_eq!(manager.active().unwrap().shell, "cmd");
+    send(
+        &mut state,
+        &mut manager,
+        "if not defined CNL_SPLIT_CHECK echo DUPE:em^pty",
+    );
+    output_contains(manager.session(duplicate).unwrap(), "DUPE:empty");
+
+    key(&mut state, &mut manager, KeyCode::F(8));
+    assert!(matches!(state.modal, Some(Modal::Confirm(id, Control::Close)) if id == duplicate));
+    key(&mut state, &mut manager, KeyCode::Esc);
+    assert_eq!(process_state(&duplicate_process, 0), WAIT_TIMEOUT);
+    key(&mut state, &mut manager, KeyCode::F(8));
+    key(&mut state, &mut manager, KeyCode::Enter);
+    finish_job(&mut state, &mut manager, &receiver);
+    assert!(manager.session(duplicate).is_none());
+    assert_eq!(process_state(&duplicate_process, 2000), WAIT_OBJECT_0);
+    assert_eq!(process_state(&original_process, 0), WAIT_TIMEOUT);
+
+    manager.arrangement.activate(original);
+    key(&mut state, &mut manager, KeyCode::F(9));
+    key(&mut state, &mut manager, KeyCode::Enter);
+    finish_job(&mut state, &mut manager, &receiver);
+    finish_job(&mut state, &mut manager, &receiver);
+    assert_eq!(manager.active().unwrap().id, original);
+    assert_eq!(manager.active().unwrap().title(), "Kiểm tra 界");
+    assert_eq!(process_state(&original_process, 2000), WAIT_OBJECT_0);
+    send(
+        &mut state,
+        &mut manager,
+        "if not defined CNL_SPLIT_CHECK echo RST:em^pty",
+    );
+    output_contains(manager.session(original).unwrap(), "RST:empty");
 }

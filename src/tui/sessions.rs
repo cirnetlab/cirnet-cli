@@ -1,47 +1,53 @@
 mod backend;
 mod input;
+mod layout;
+mod render;
+mod workspace;
 
 use std::{
     io::{self, IsTerminal},
     num::NonZeroU16,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{Arc, Mutex, mpsc::SyncSender},
 };
 
 use anyhow::{Context, Result, ensure};
+use clap::ArgMatches;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind},
+    event::{KeyEvent, MouseEvent},
     style::{Attribute, Attributes, Color},
     terminal as console,
 };
 use portable_pty::{ExitStatus, PtySize};
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use self::{
-    backend::{Backend, MAX_PASTE},
+    backend::Backend,
     input::{key_bytes, mouse_bytes},
+    layout::{Arrangement, Layout, Sidebar},
+    workspace::{Catalog, WorkspaceEvent},
 };
-use super::terminal::{Frame, Line, Painter, Screen, Tone, color_enabled};
-use crate::localization::text as locale;
+use super::terminal::{Line, Screen, Tone};
+use crate::{localization::text as locale, repositories::Row, workspace::Workspace};
 
 const MAX_SESSIONS: usize = 12;
 const SCROLLBACK_ROWS: usize = 500;
-const HEADER: u16 = 2;
-const CHROME: u16 = HEADER + 1;
+type SessionId = u64;
+type Target<'a> = (&'a str, &'a Path, Option<&'a str>);
 
 #[derive(Default)]
 pub(super) struct Manager {
     entries: Vec<Session>,
+    arrangement: Arrangement,
+    next_id: SessionId,
 }
 
 impl Manager {
-    pub(super) fn open(
+    pub(super) fn open_with_repositories(
         &mut self,
-        key: &str,
-        cwd: &Path,
-        shell: Option<&str>,
+        (key, cwd, shell): Target<'_>,
+        workspace: &Workspace,
+        flags: &ArgMatches,
+        rows: Option<&[Row]>,
         vi: bool,
     ) -> Result<()> {
         ensure!(
@@ -49,7 +55,7 @@ impl Manager {
             "{}",
             locale(crate::localization::SHELL_INTERACTIVE, vi)
         );
-        let cwd = crate::workspace::canonical(cwd)?;
+        let cwd = std::fs::canonicalize(cwd)?;
         ensure!(
             cwd.is_dir(),
             "{}",
@@ -61,10 +67,20 @@ impl Manager {
                 vi
             )
         );
-        let mut screen = Screen::enter(io::stdout())?;
         let size = console::size()?;
         let index = self.attach(key, &cwd, shell, pty_size(size), vi)?;
-        self.interact(&mut screen, index, size, vi)
+        let id = self.entries[index].id;
+        self.arrangement.activate(id);
+        self.arrangement.sidebar_focused = false;
+        if size.0 < 54 {
+            self.arrangement.sidebar = Sidebar::Auto;
+        }
+        let catalog = Catalog::new(workspace, flags, rows);
+        if let Some(name) = catalog.name_for(&cwd, key) {
+            self.entries[index].repository = name.into();
+        }
+        let mut screen = Screen::enter(io::BufWriter::with_capacity(64 * 1024, io::stdout()))?;
+        workspace::interact(self, &mut screen, size, catalog, vi)
     }
 
     fn attach(
@@ -75,180 +91,116 @@ impl Manager {
         size: PtySize,
         vi: bool,
     ) -> Result<usize> {
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|item| item.key == key && item.cwd == cwd)
-        {
+        // Once open, shell changes happen in a new independent session.
+        if let Some(index) = self.entries.iter().position(|session| {
+            session.cwd == cwd && shell.is_none_or(|shell| session.shell == shell)
+        }) {
             return Ok(index);
         }
+        self.ensure_capacity(vi)?;
+        let index = self.entries.len();
+        let mut arrangement = self.arrangement.clone();
+        arrangement.activate(self.next_id + 1);
+        let size = Layout::new((size.cols, size.rows), &arrangement)
+            .pane(self.next_id + 1)
+            .map_or(size, |pane| pane.size());
+        let session = Session::start(key, cwd, shell, size, vi)?;
+        self.insert(session);
+        Ok(index)
+    }
+
+    fn ensure_capacity(&self, vi: bool) -> Result<()> {
         ensure!(
             self.entries.len() < MAX_SESSIONS,
             "{}",
             locale(
                 [
-                    "Terminal session limit reached. Open an existing session and close it with F8.",
-                    "Đã đạt giới hạn phiên terminal. Mở một phiên hiện có và đóng bằng F8.",
+                    "Terminal session limit reached. Close a session with F8.",
+                    "Đã đạt giới hạn phiên terminal. Đóng một phiên bằng F8.",
                 ],
                 vi
             )
         );
-        let index = self.entries.len();
-        self.entries
-            .push(Session::start(key, cwd, shell, size, vi)?);
-        Ok(index)
+        Ok(())
     }
 
-    fn interact(
-        &mut self,
-        screen: &mut Screen<io::Stdout>,
-        mut index: usize,
-        mut size: (u16, u16),
-        vi: bool,
-    ) -> Result<()> {
-        let mut painter = Painter::default();
-        let mut drawn = None;
-        let mut prompt = None;
-        let mut feedback = None;
-        loop {
-            let session = &mut self.entries[index];
-            session.resize(pty_size(size));
-            let frame = {
-                let output = session.output.lock().unwrap();
-                let stamp = (index, size, output.revision, prompt, feedback);
-                if drawn == Some(stamp) {
-                    None
-                } else {
-                    drawn = Some(stamp);
-                    Some(session.frame(&output, size, prompt, feedback, vi))
-                }
-            };
-            if let Some(mut frame) = frame {
-                if let Some(header) = frame.rows.first_mut() {
-                    push_clipped(
-                        header,
-                        Tone::Muted,
-                        &format!("  [{}/{}]", index + 1, self.entries.len()),
-                        size.0,
-                    );
-                }
-                painter.draw(&mut screen.out, frame, color_enabled())?;
-            }
-            if !event::poll(Duration::from_millis(45))? {
-                continue;
-            }
-            match event::read()? {
-                Event::Resize(width, height) => size = (width, height),
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    if let Some(action) = prompt {
-                        if key.code == KeyCode::Esc {
-                            prompt = None;
-                        }
-                        if key.code == KeyCode::Enter {
-                            prompt = None;
-                            let previous = self.entries.remove(index);
-                            if action == Action::Close {
-                                return Ok(());
-                            }
-                            let (key, cwd, shell) = (
-                                previous.key.clone(),
-                                previous.cwd.clone(),
-                                previous.shell.clone(),
-                            );
-                            drop(previous);
-                            let replacement =
-                                Session::start(&key, &cwd, Some(&shell), pty_size(size), vi)?;
-                            self.entries.insert(index, replacement);
-                            drawn = None;
-                        }
-                        continue;
-                    }
-                    let no_modifiers = key.modifiers.is_empty();
-                    feedback = None;
-                    match key.code {
-                        KeyCode::F(10) if no_modifiers => return Ok(()),
-                        KeyCode::F(8) if no_modifiers => prompt = Some(Action::Close),
-                        KeyCode::F(9) if no_modifiers => prompt = Some(Action::Restart),
-                        KeyCode::F(6) if no_modifiers => {
-                            index = if index == 0 {
-                                self.entries.len() - 1
-                            } else {
-                                index - 1
-                            };
-                        }
-                        KeyCode::F(7) if no_modifiers => {
-                            index = (index + 1) % self.entries.len();
-                        }
-                        KeyCode::PageUp | KeyCode::PageDown
-                            if key.modifiers == KeyModifiers::SHIFT =>
-                        {
-                            let page = i32::from(pty_size(size).rows);
-                            self.entries[index].scroll(if key.code == KeyCode::PageUp {
-                                page
-                            } else {
-                                -page
-                            });
-                        }
-                        _ => {
-                            if !self.entries[index].key(key) {
-                                feedback = Some(Feedback::Input);
-                            }
-                        }
-                    }
-                }
-                Event::Paste(value) if prompt.is_none() => {
-                    feedback = if value.len() > MAX_PASTE {
-                        Some(Feedback::Paste)
-                    } else if !self.entries[index].paste(value) {
-                        Some(Feedback::Input)
-                    } else {
-                        None
-                    };
-                }
-                Event::Mouse(mouse) if prompt.is_none() => {
-                    let session = &self.entries[index];
-                    let packet = {
-                        let output = session.output.lock().unwrap();
-                        let screen = output.parser.screen();
-                        if screen.scrollback() != 0 {
-                            None
-                        } else {
-                            mouse_bytes(mouse, screen, HEADER)
-                        }
-                    };
-                    if let Some(packet) = packet {
-                        if !session.send(packet) {
-                            feedback = Some(Feedback::Input);
-                        }
-                    } else {
-                        match mouse.kind {
-                            MouseEventKind::ScrollUp => session.scroll(3),
-                            MouseEventKind::ScrollDown => session.scroll(-3),
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
+    fn insert(&mut self, mut session: Session) -> SessionId {
+        self.next_id += 1;
+        session.id = self.next_id;
+        self.entries.push(session);
+        self.next_id
+    }
+
+    fn position(&self, id: SessionId) -> Option<usize> {
+        self.entries.iter().position(|entry| entry.id == id)
+    }
+
+    fn session(&self, id: SessionId) -> Option<&Session> {
+        self.position(id).map(|index| &self.entries[index])
+    }
+
+    fn active(&self) -> Option<&Session> {
+        self.arrangement.active().and_then(|id| self.session(id))
+    }
+
+    fn resize_visible(&mut self, layout: &Layout) {
+        for pane in layout.panes.into_iter().flatten() {
+            if let Some(index) = self.position(pane.id) {
+                self.entries[index].resize(pane.size());
             }
         }
     }
+
+    fn cycle(&mut self, step: isize) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let current = self
+            .arrangement
+            .active()
+            .and_then(|id| self.position(id))
+            .unwrap_or_default();
+        let next = (current as isize + step).rem_euclid(self.entries.len() as isize) as usize;
+        self.arrangement.activate(self.entries[next].id);
+    }
+
+    fn reorder(&mut self, id: SessionId, step: isize) {
+        if let Some(index) = self.position(id)
+            && let Some(next) = index.checked_add_signed(step)
+            && next < self.entries.len()
+        {
+            self.entries.swap(index, next);
+        }
+    }
+
+    fn take(&mut self, id: SessionId) -> Option<Session> {
+        let index = self.position(id)?;
+        let session = self.entries.remove(index);
+        let fallback = self
+            .entries
+            .get(index.min(self.entries.len().saturating_sub(1)))
+            .map(|session| session.id);
+        self.arrangement.close(id, fallback);
+        Some(session)
+    }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Action {
-    Close,
-    Restart,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Feedback {
-    Input,
-    Paste,
+fn repository_name(key: &str, cwd: &Path) -> String {
+    let identity = key.split_once(" · ").map_or(key, |(name, _)| name);
+    if Path::new(identity).is_absolute() || identity.is_empty() {
+        cwd.file_name()
+            .map_or_else(|| "Repository".into(), |name| name.to_string_lossy().into())
+    } else {
+        identity.into()
+    }
 }
 
 struct Session {
+    id: SessionId,
     key: String,
     cwd: PathBuf,
+    repository: String,
+    label: Option<String>,
     shell: String,
     size: PtySize,
     backend: Backend,
@@ -273,8 +225,11 @@ impl Session {
             result => result?,
         };
         Ok(Self {
+            id: 0,
             key: key.into(),
             cwd: cwd.into(),
+            repository: repository_name(key, cwd),
+            label: None,
             shell: shell.into(),
             size,
             output: Arc::clone(&backend.output),
@@ -341,138 +296,53 @@ impl Session {
         }
     }
 
-    fn frame(
-        &self,
-        output: &Output,
-        size: (u16, u16),
-        action: Option<Action>,
-        feedback: Option<Feedback>,
-        vi: bool,
-    ) -> Frame {
-        let mut frame = Frame::new(size);
-        let Some(header) = frame.rows.first_mut() else {
-            return frame;
-        };
-        let screen = output.parser.screen();
-        let status = match output.exit.as_ref() {
-            Some(Ok(status)) => format!("{} {status}", locale(["Exited", "Đã thoát"], vi)),
-            Some(Err(error)) => format!("{} {error}", locale(["Exited", "Đã thoát"], vi)),
-            None => locale(["Running", "Đang chạy"], vi).into(),
-        };
-        let title = format!(
-            "{} · {} · {} · {status}",
-            locale(["Repository terminal", "Terminal kho mã"], vi),
-            self.key,
-            self.shell,
-        );
-        push_clipped(header, Tone::Accent, &title, size.0);
-        if size.1 >= 3 {
-            push_clipped(
-                &mut frame.rows[1],
-                Tone::Muted,
-                &self.cwd.to_string_lossy(),
-                size.0,
-            );
-        }
-        if size.1 > HEADER {
-            let (rows, columns) = screen.size();
-            let view_rows = rows.get().min(size.1 - CHROME);
-            let view_columns = columns.get().min(size.0);
-            for row in 0..view_rows {
-                frame.rows[usize::from(row + HEADER)] = terminal_line(screen, row, view_columns);
-            }
-            let (row, col) = screen.cursor_position();
-            if action.is_none()
-                && output.exit.is_none()
-                && screen.scrollback() == 0
-                && !screen.hide_cursor()
-                && row < view_rows
-                && view_columns > 0
-            {
-                frame.cursor = Some((col.min(view_columns - 1), row + HEADER));
-            }
-        }
-        if size.1 > 1 {
-            let (note, tone) = footer(output, action, feedback, vi);
-            push_clipped(frame.rows.last_mut().unwrap(), tone, &note, size.0);
-        }
-        frame
+    fn watch(&self, wake: Option<&SyncSender<WorkspaceEvent>>) {
+        self.output.lock().unwrap().wake = wake.cloned();
     }
-}
 
-fn footer(
-    output: &Output,
-    action: Option<Action>,
-    feedback: Option<Feedback>,
-    vi: bool,
-) -> (String, Tone) {
-    let warning = match action {
-        Some(Action::Close) => Some([
-            "Close this shell and its attached processes? Enter closes · Esc returns",
-            "Đóng shell và các tiến trình liên quan? Enter đóng · Esc quay lại",
-        ]),
-        Some(Action::Restart) => Some([
-            "Restart this shell? Enter restarts and clears its state · Esc returns",
-            "Khởi động lại shell? Enter khởi động lại và xóa trạng thái · Esc quay lại",
-        ]),
-        None => match feedback {
-            Some(Feedback::Input) => Some([
-                "Terminal input unavailable or busy · F9 restart · F10 back",
-                "Thiết bị nhập terminal không khả dụng hoặc đang bận · F9 khởi động lại · F10 quay lại",
-            ]),
-            Some(Feedback::Paste) => Some([
-                "Paste exceeds 32 KiB. Paste smaller parts.",
-                "Nội dung dán vượt 32 KiB. Hãy chia thành các phần nhỏ.",
-            ]),
-            None if output.resize_failed => Some([
-                "Shell resize failed · F9 restart · F10 back",
-                "Không thể đổi kích thước shell · F9 khởi động lại · F10 quay lại",
-            ]),
-            None if output.input_failed && output.exit.is_none() => Some([
-                "Terminal input stopped · F9 restart · F10 back",
-                "Thiết bị nhập terminal đã dừng · F9 khởi động lại · F10 quay lại",
-            ]),
-            None => None,
-        },
-    };
-    if let Some(warning) = warning {
-        return (locale(warning, vi).into(), Tone::Warning);
+    fn title(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.repository)
     }
-    let shortcuts = locale(
-        [
-            "F10 Back · F6/F7 Session · F8 Close · F9 Restart · Shift+PgUp/PgDn Scroll",
-            "F10 Quay lại · F6/F7 Đổi phiên · F8 Đóng · F9 Khởi động lại · Shift+PgUp/PgDn Cuộn",
-        ],
-        vi,
-    );
-    let scrollback = output.parser.screen().scrollback();
-    if scrollback == 0 {
-        (shortcuts.into(), Tone::Muted)
-    } else {
-        let scroll = locale(["Scrollback", "Lịch sử cuộn"], vi);
-        (format!("{scroll} +{scrollback} · {shortcuts}"), Tone::Muted)
-    }
-}
 
-fn push_clipped(line: &mut Line, tone: Tone, value: &str, width: u16) {
-    let mut used = line.contents().width();
-    let clean = value.replace(char::is_control, " ");
-    let end = clean.grapheme_indices(true).find_map(|(index, grapheme)| {
-        used += grapheme.width();
-        (used > usize::from(width)).then_some(index)
-    });
-    line.push(tone, &clean[..end.unwrap_or(clean.len())]);
+    fn rename(&mut self, label: &str) {
+        let label = label.trim();
+        self.label = (!label.is_empty()).then(|| label.to_owned());
+    }
+
+    fn running(&self) -> bool {
+        self.output.lock().unwrap().exit.is_none()
+    }
+
+    fn needs_close_confirmation(&self) -> bool {
+        self.output
+            .lock()
+            .unwrap()
+            .exit
+            .as_ref()
+            .is_none_or(|exit| exit.is_err())
+    }
+
+    fn mouse(&self, mouse: MouseEvent, origin: (u16, u16)) -> Option<bool> {
+        let packet = {
+            let output = self.output.lock().unwrap();
+            let screen = output.parser.screen();
+            if output.exit.is_some() || screen.scrollback() != 0 {
+                return None;
+            }
+            mouse_bytes(mouse, screen, origin)?
+        };
+        Some(self.send(packet))
+    }
 }
 
 fn pty_size((width, height): (u16, u16)) -> PtySize {
     PtySize {
         cols: width.clamp(1, 256),
-        rows: height.saturating_sub(CHROME).clamp(1, 120),
+        rows: height.clamp(1, 120),
         pixel_width: 0,
         pixel_height: 0,
     }
 }
-
 fn dimensions(size: PtySize) -> (NonZeroU16, NonZeroU16) {
     (
         NonZeroU16::new(size.rows).unwrap(),
@@ -482,7 +352,7 @@ fn dimensions(size: PtySize) -> (NonZeroU16, NonZeroU16) {
 
 struct Output {
     parser: vt100::Parser<Replies>,
-    revision: u64,
+    wake: Option<SyncSender<WorkspaceEvent>>,
     exit: Option<std::result::Result<ExitStatus, String>>,
     input_failed: bool,
     resize_failed: bool,
@@ -498,7 +368,7 @@ impl Output {
                 SCROLLBACK_ROWS,
                 Replies::default(),
             ),
-            revision: 0,
+            wake: None,
             exit: None,
             input_failed: false,
             resize_failed: false,
@@ -506,7 +376,9 @@ impl Output {
     }
 
     fn changed(&mut self) {
-        self.revision = self.revision.wrapping_add(1);
+        if let Some(wake) = &self.wake {
+            let _ = wake.try_send(WorkspaceEvent::Wake);
+        }
     }
 
     fn process(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {

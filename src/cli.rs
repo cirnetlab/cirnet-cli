@@ -392,8 +392,26 @@ fn render_report(output: &mut String, value: &Value, key: &str, indent: usize, v
             }
         }
         Value::String(value) => {
-            let value = localization::report_value(key, value).map_or(value.as_str(), lookup);
-            let _ = writeln!(output, "{value}");
+            if matches!(
+                key,
+                "path"
+                    | "workspace"
+                    | "commonDir"
+                    | "stateDirectory"
+                    | "logDirectory"
+                    | "dataDirectory"
+                    | "bundle"
+                    | "receipt"
+            ) {
+                let _ = writeln!(
+                    output,
+                    "{}",
+                    crate::workspace::user_path(std::path::Path::new(value))
+                );
+            } else {
+                let value = localization::report_value(key, value).map_or(value.as_str(), lookup);
+                let _ = writeln!(output, "{value}");
+            }
         }
         Value::Bool(value) => {
             let _ = writeln!(
@@ -430,6 +448,21 @@ pub(crate) fn parse_error(error: &clap::Error, vi: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_displays_friendly_paths_without_rewriting_json_or_raw_output() {
+        let drive = r"\\?\E:\repo\alpha";
+        let network = r"\\?\UNC\server\share\beta";
+        let report = json!({"path":drive,"commonDir":network,"detail":drive});
+        for vi in [false, true] {
+            let output = human_report(&report, vi);
+            assert!(output.contains(r": E:\repo\alpha"));
+            assert!(output.contains(r": \\server\share\beta"));
+            assert!(output.contains(drive), "raw Git diagnostics are preserved");
+        }
+        assert_eq!(report["path"], drive);
+        assert_eq!(report["commonDir"], network);
+    }
 
     #[test]
     fn human_report_translates_only_owned_report_values() {

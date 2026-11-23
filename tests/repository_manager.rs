@@ -32,14 +32,31 @@ impl Fixture {
     fn init(&self, path: &str) -> PathBuf {
         let path = self.workspace.join(path);
         fs::create_dir_all(&path).unwrap();
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(&path)
-            .args(["init", "-q"])
-            .status()
-            .unwrap();
-        assert!(status.success());
+        self.git(&path, &["init", "-q", "-b", "main"]);
         path
+    }
+
+    fn git(&self, path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args([
+                "-c",
+                "user.name=Fixture Author",
+                "-c",
+                "user.email=test@example.org",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }
 
     fn run(&self, args: &[&str]) -> Output {
@@ -73,6 +90,17 @@ impl Fixture {
             .unwrap()
             .path()
     }
+
+    fn set_catalog(&self, repositories: Value) {
+        fs::write(
+            self.directory().join("github-catalog.json"),
+            serde_json::to_vec(
+                &json!({"version": 1, "refreshed": 1, "repositories": repositories}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
 }
 
 impl Drop for Fixture {
@@ -90,6 +118,260 @@ impl Drop for Fixture {
 
 fn same_path(path: &Path, value: &Value) -> bool {
     fs::canonicalize(path).unwrap() == fs::canonicalize(value.as_str().unwrap()).unwrap()
+}
+
+#[test]
+fn discovery_inspects_live_git_metadata() {
+    let f = Fixture::new();
+    let checkout = f.init("alpha");
+    f.git(&checkout, &["config", "core.abbrev", "no"]);
+    f.git(&checkout, &["config", "status.aheadBehind", "false"]);
+    f.git(
+        &checkout,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/cirnetlab/alpha.git",
+        ],
+    );
+    f.git(&checkout, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    f.git(
+        &checkout,
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+    );
+    f.git(&checkout, &["branch", "--set-upstream-to=origin/main"]);
+    f.git(
+        &checkout,
+        &[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "second",
+            "-m",
+            "Second paragraph",
+        ],
+    );
+    let revision = f.git(&checkout, &["rev-parse", "HEAD"]);
+    fs::write(checkout.join("untracked.txt"), "new").unwrap();
+
+    let discovery = f.json(&["discover", "--offline"]);
+    let row = &discovery["repositories"][0];
+    assert_eq!(row["registered"], false);
+    assert!(same_path(&checkout, &row["path"]));
+    assert_eq!(row["branch"], "main");
+    assert_eq!(row["state"], "untracked");
+    assert_eq!(row["upstream"], "origin/main");
+    assert_eq!(row["ahead"], 1);
+    assert_eq!(row["behind"], 0);
+    assert_eq!(row["remote"], "cirnetlab/alpha");
+    assert_eq!(row["revision"], revision);
+    let short = row["shortRevision"].as_str().unwrap();
+    assert!(short.len() < revision.len() && revision.starts_with(short));
+    assert_eq!(row["commitMessage"], "second\n\nSecond paragraph");
+    assert_eq!(row["commitAuthor"], "Fixture Author");
+    assert!(row["commitTimestamp"].is_string());
+    assert!(row["lastVerified"].is_number());
+}
+
+#[test]
+fn discovery_keeps_unborn_branch_and_detached_commit_distinct() {
+    let f = Fixture::new();
+    f.init("new-checkout");
+    let detached = f.init("detached-checkout");
+    f.git(&detached, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    f.git(&detached, &["checkout", "--detach", "-q"]);
+
+    let discovery = f.json(&["discover", "--offline"]);
+    let rows = discovery["repositories"].as_array().unwrap();
+    let new = rows
+        .iter()
+        .find(|row| row["name"] == "new-checkout")
+        .unwrap();
+    assert_eq!(new["branch"], "main");
+    assert_eq!(new["unborn"], true);
+    assert!(new["revision"].is_null());
+    let detached = rows
+        .iter()
+        .find(|row| row["name"] == "detached-checkout")
+        .unwrap();
+    assert!(detached["branch"].is_null());
+    assert_eq!(detached["state"], "detached");
+    assert_eq!(detached["detached"], true);
+    assert!(detached["revision"].is_string());
+}
+
+#[test]
+fn discovery_merges_registry_and_catalog_identity_with_unique_checkout() {
+    let f = Fixture::new();
+    f.json(&["group", "create", "fixture"]);
+    f.set_catalog(json!([
+        {"id": 3, "full_name": "cirnetlab/original", "private": true, "archived": false, "default_branch": "release"}
+    ]));
+    let registration = f.json(&["register", "original", "--offline"]);
+    let id = registration["repository"]["id"].as_str().unwrap();
+    f.json(&[
+        "config",
+        id,
+        "--alias",
+        "test-alias",
+        "--preferred-branch",
+        "stable",
+        "--shell",
+        "bash",
+    ]);
+    f.json(&["group", "add", "fixture", id]);
+    f.set_catalog(json!([
+        {"id": 3, "full_name": "cirnetlab/renamed", "private": true, "archived": false, "default_branch": "release"},
+        {"id": 4, "full_name": "cirnetlab/remote-only", "private": false, "archived": true, "default_branch": "remote-main"}
+    ]));
+    let checkout = f.init("different-folder");
+    f.git(
+        &checkout,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/CIRNETLAB/Renamed.git",
+        ],
+    );
+
+    let discovery = f.json(&["discover", "--offline"]);
+    let rows = discovery["repositories"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    let local = rows.iter().find(|row| row["selector"] == id).unwrap();
+    assert_eq!(local["alias"], "test-alias");
+    assert_eq!(local["preferredBranch"], "stable");
+    assert_eq!(local["groups"], json!(["fixture"]));
+    assert_eq!(local["shell"], "bash");
+    assert_eq!(local["branch"], "main");
+    assert_eq!(local["private"], true);
+    assert!(same_path(&checkout, &local["path"]));
+    let remote = rows
+        .iter()
+        .find(|row| row["name"] == "remote-only")
+        .unwrap();
+    assert!(remote["path"].is_null());
+    assert_eq!(remote["state"], "available");
+    assert_eq!(remote["branch"], "remote-main");
+    assert_eq!(remote["archived"], true);
+    assert_eq!(f.json(&["status", id])["repositories"][0]["branch"], "main");
+    assert!(f.json(&["list"])["repositories"][0]["path"].is_null());
+}
+
+#[test]
+fn discovery_keeps_distinct_linked_worktrees_for_one_catalog_repository() {
+    let f = Fixture::new();
+    let main = f.init("main-checkout");
+    f.git(
+        &main,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/cirnetlab/shared.git",
+        ],
+    );
+    f.git(&main, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    f.git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            "../feature-checkout",
+        ],
+    );
+    f.json(&["add", "main-checkout"]);
+    f.set_catalog(json!([
+        {"id": 1, "full_name": "cirnetlab/shared", "private": false, "archived": false, "default_branch": "release"}
+    ]));
+
+    let discovery = f.json(&["discover", "--offline"]);
+    let rows = discovery["repositories"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    let main = rows.iter().find(|row| row["branch"] == "main").unwrap();
+    let feature = rows.iter().find(|row| row["branch"] == "feature").unwrap();
+    assert_eq!(main["registered"], true);
+    assert_eq!(feature["registered"], false);
+    assert_eq!(feature["remote"], "cirnetlab/shared");
+    assert_ne!(main["path"], feature["path"]);
+}
+
+#[test]
+fn discovery_does_not_treat_a_reused_github_slug_as_the_registered_identity() {
+    let f = Fixture::new();
+    f.json(&["group", "create", "fixture"]);
+    f.set_catalog(json!([
+        {"id": 3, "full_name": "cirnetlab/original", "private": true, "archived": false, "default_branch": "main"}
+    ]));
+    let registration = f.json(&["register", "original", "--offline"]);
+    let id = registration["repository"]["id"].as_str().unwrap();
+    let checkout = f.init("local");
+    f.git(
+        &checkout,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/cirnetlab/original.git",
+        ],
+    );
+    f.json(&["add", "local"]);
+    f.set_catalog(json!([
+        {"id": 3, "full_name": "cirnetlab/renamed", "private": true, "archived": false, "default_branch": "main"},
+        {"id": 4, "full_name": "cirnetlab/original", "private": false, "archived": false, "default_branch": "main"}
+    ]));
+    let discovery = f.json(&["discover", "--offline"]);
+    let rows = discovery["repositories"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    let saved = rows.iter().find(|row| row["selector"] == id).unwrap();
+    assert_eq!(saved["state"], "invalid");
+    let current = rows
+        .iter()
+        .find(|row| row["selector"] == "cirnetlab/original")
+        .unwrap();
+    assert_eq!(current["state"], "available");
+    assert!(!f.run(&["switch", id]).status.success());
+    f.git(
+        &checkout,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/cirnetlab/renamed.git",
+        ],
+    );
+    assert_eq!(f.json(&["status", id])["repositories"][0]["branch"], "main");
+}
+
+#[test]
+fn discovery_reports_missing_and_invalid_checkout_separately() {
+    let f = Fixture::new();
+    let missing = f.init("missing-checkout");
+    f.json(&["add", "missing-checkout"]);
+    fs::rename(missing, f.root.join("old-checkout")).unwrap();
+    let invalid = f.workspace.join("invalid-checkout");
+    fs::create_dir(&invalid).unwrap();
+    fs::write(invalid.join(".git"), "invalid gitdir pointer").unwrap();
+
+    let discovery = f.json(&["discover", "--offline"]);
+    let rows = discovery["repositories"].as_array().unwrap();
+    let missing = rows
+        .iter()
+        .find(|row| row["name"] == "missing-checkout")
+        .unwrap();
+    let invalid = rows
+        .iter()
+        .find(|row| row["name"] == "invalid-checkout")
+        .unwrap();
+    assert_eq!(missing["state"], "missing");
+    assert_eq!(invalid["state"], "invalid");
+    assert!(missing["branch"].is_null());
+    assert!(invalid["lastVerified"].is_null());
 }
 
 #[test]

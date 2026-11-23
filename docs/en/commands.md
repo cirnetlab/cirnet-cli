@@ -104,7 +104,11 @@ Use `--yes` to confirm bulk clone, add, or removal after checking the preview. L
 | `cnl repos branch <REPO> <BRANCH> [--switch]` · `cnl repos worktree <REPO> <PATH> --branch <BRANCH>` | Create or switch to a branch, or add a worktree for an existing branch. |
 | `cnl repos stage <REPO> <PATH>...` · `cnl repos commit <REPO> -m <MESSAGE>` · `cnl repos push <REPO>` | Stage named paths, commit staged changes, or push the tracked branch. Each command requires an explicit invocation. |
 
-In the dashboard, use `/` to search, Space to select, `G` to filter groups, `S` to sort, `A` for actions, and `T` for the current repository terminal. Review the targets and confirm mutations with `Y`. In a shell, use F6 and F7 to switch sessions, F8 to close, F9 to restart, and F10 to return to the dashboard. A detached session remains open until the manager exits or you close it.
+The dashboard shows verified branch and upstream status alongside the short commit hash. Open Details or History for commit information. Use `/` to search, Space to select, and `G` to filter groups. Left and Right scroll the table horizontally. Hover over a path or press `P` to see it in full. Press `C` to copy it. Use `A` for actions, review the targets, and confirm changes with `Y`. Esc returns to the previous view.
+
+Press `:` to open the shared CNL command field. It uses the same history, completion and output controls as the main terminal. Press `T` to open the focused repository terminal.
+
+In the terminal workspace, press F1 for a new session, F2 to rename its label, F3 to split or unsplit, F4 for the session list, and F5 for actions including Move and Duplicate. F6 and F7 switch sessions. F8 closes the selected session, F9 restarts it, and F10 returns to the dashboard. A session keeps its state when you return to the dashboard. Duplicate starts a fresh shell in the same initial directory.
 
 ### Runtime options for `run` and `dev`
 

@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     env, fs,
     path::{Path, PathBuf},
     process::Command,
@@ -98,6 +99,26 @@ impl Repo {
 
 pub struct Workspace {
     pub root: PathBuf,
+}
+
+pub(crate) fn user_path(path: &Path) -> Cow<'_, str> {
+    let text = path.to_string_lossy();
+    if let Some(remainder) = text.strip_prefix(r"\\?\") {
+        if remainder
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"UNC\"))
+        {
+            return Cow::Owned(format!(r"\\{}", &remainder[4..]));
+        }
+        if matches!(remainder.as_bytes(), [letter, b':', b'\\', ..] if letter.is_ascii_alphabetic())
+        {
+            return match text {
+                Cow::Borrowed(text) => Cow::Borrowed(&text[4..]),
+                Cow::Owned(text) => Cow::Owned(text[4..].to_owned()),
+            };
+        }
+    }
+    text
 }
 
 pub fn canonical(path: &Path) -> Result<PathBuf> {
@@ -329,4 +350,25 @@ fn redact_remote(line: &str) -> String {
         url.to_owned()
     };
     format!("{name} {url} {operation}")
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn user_paths_keep_windows_drives_and_unc_shares_readable() {
+        for (internal, visible) in [
+            (r"\\?\E:\repo có dấu", r"E:\repo có dấu"),
+            (r"\\?\UNC\server\share\repo", r"\\server\share\repo"),
+            (r"\\?\unc\server\share\repo", r"\\server\share\repo"),
+            (r"\\server\share\repo", r"\\server\share\repo"),
+            (r"\\?\Volume{example}\repo", r"\\?\Volume{example}\repo"),
+            ("/tmp/workspace", "/tmp/workspace"),
+        ] {
+            let path = PathBuf::from(internal);
+            assert_eq!(user_path(&path), visible);
+            assert_eq!(path.as_os_str(), internal);
+        }
+    }
 }

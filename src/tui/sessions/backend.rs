@@ -38,6 +38,8 @@ pub(super) struct Backend {
     resize: Option<SyncSender<PtySize>>,
     monitor: Option<JoinHandle<()>>,
     pub(super) output: Arc<Mutex<Output>>,
+    #[cfg(all(test, windows))]
+    pub(super) process_id: u32,
 }
 
 impl Backend {
@@ -59,7 +61,7 @@ impl Backend {
                 )
             );
         }
-        let command = command(shell, cwd)?;
+        let command = command(shell, cwd, vi)?;
         let pair = native_pty_system().openpty(size).context(locale(
             [
                 "The interactive terminal could not be allocated",
@@ -101,6 +103,8 @@ impl Backend {
                 locale(crate::localization::SHELL_INSTALL, vi)
             )
         })?;
+        #[cfg(all(test, windows))]
+        let process_id = child.process_id().expect("ConPTY returned a process id");
         drop(pair.slave);
         process
             .send(Process::new(pair.master, child, stop))
@@ -115,6 +119,8 @@ impl Backend {
             resize: Some(resize),
             monitor: Some(monitor),
             output,
+            #[cfg(all(test, windows))]
+            process_id,
         })
     }
 
@@ -148,7 +154,7 @@ impl Drop for Backend {
 
 fn validate_directory(cwd: &Path, vi: bool) -> Result<()> {
     ensure!(
-        cwd.is_dir() && crate::workspace::canonical(cwd)? == cwd,
+        cwd.is_dir() && std::fs::canonicalize(cwd)? == cwd,
         "{}",
         locale(
             [
@@ -161,14 +167,33 @@ fn validate_directory(cwd: &Path, vi: bool) -> Result<()> {
     Ok(())
 }
 
-fn command(shell: &str, cwd: &Path) -> Result<CommandBuilder> {
+fn command(shell: &str, cwd: &Path, vi: bool) -> Result<CommandBuilder> {
     let template = crate::cli::native::shell(Some(shell))?;
+    let shell_cwd = if cfg!(windows) && matches!(shell, "cmd" | "wsl") {
+        // CMD treats a verbatim drive prefix like a network path. WSL's
+        // --cd adapter also expects the standard Windows path spelling.
+        let standard = crate::workspace::canonical(cwd)?;
+        ensure!(
+            std::fs::canonicalize(&standard)? == cwd,
+            "{}",
+            locale(
+                [
+                    "The selected shell cannot use this working directory",
+                    "Shell đã chọn không thể dùng thư mục làm việc này"
+                ],
+                vi
+            )
+        );
+        std::borrow::Cow::Owned(standard)
+    } else {
+        std::borrow::Cow::Borrowed(cwd)
+    };
     let mut command = CommandBuilder::new(template.get_program());
     if shell == "wsl" {
         // WSL accepts an absolute Windows path for --cd and requires it
         // before --exec. Keep it one argv value, including embedded spaces.
         command.arg("--cd");
-        command.arg(cwd);
+        command.arg(shell_cwd.as_ref());
         command.args([
             "--exec",
             "env",
@@ -180,7 +205,7 @@ fn command(shell: &str, cwd: &Path) -> Result<CommandBuilder> {
     } else {
         command.args(template.get_args());
     }
-    command.cwd(cwd);
+    command.cwd(shell_cwd.as_ref());
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
     command.env_remove("CNL_TUI_REPORT");

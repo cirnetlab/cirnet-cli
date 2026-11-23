@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io,
     process::{Command, Stdio},
 };
@@ -58,15 +59,14 @@ impl Catalog {
     }
 
     pub fn valid(&self) -> bool {
+        let mut ids = HashSet::new();
+        let mut slugs = HashSet::new();
         self.version == CATALOG_VERSION
-            && self.repositories.iter().all(Remote::valid)
-            && self
-                .repositories
-                .iter()
-                .map(|entry| entry.id)
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-                == self.repositories.len()
+            && self.repositories.iter().all(|entry| {
+                entry.valid()
+                    && ids.insert(entry.id)
+                    && slugs.insert(entry.slug.to_ascii_lowercase())
+            })
     }
 
     pub fn get(&self, key: &str) -> Option<&Remote> {
@@ -172,11 +172,16 @@ fn fetch_with(mut run: impl FnMut(&[&str]) -> Result<Reply, Failure>) -> Result<
     }
     let mut repositories: Vec<_> = records.into_values().collect();
     repositories.sort_by_cached_key(|entry| entry.slug.to_ascii_lowercase());
-    Ok(Catalog {
+    let catalog = Catalog {
         version: CATALOG_VERSION,
         refreshed: now(),
         repositories,
-    })
+    };
+    if catalog.valid() {
+        Ok(catalog)
+    } else {
+        Err(Failure::Data)
+    }
 }
 
 fn classify(stderr: &[u8]) -> Option<Failure> {

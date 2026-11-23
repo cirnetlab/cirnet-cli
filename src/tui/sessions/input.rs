@@ -77,11 +77,15 @@ pub(super) fn key_bytes(key: KeyEvent, application_cursor: bool) -> Option<Vec<u
     })
 }
 
-pub(super) fn mouse_bytes(event: MouseEvent, screen: &vt100::Screen, top: u16) -> Option<Vec<u8>> {
+pub(super) fn mouse_bytes(
+    event: MouseEvent,
+    screen: &vt100::Screen,
+    (left, top): (u16, u16),
+) -> Option<Vec<u8>> {
     use MouseEventKind::*;
     use MouseProtocolMode::*;
     let mode = screen.mouse_protocol_mode();
-    let x = event.column.checked_add(1)?;
+    let x = event.column.checked_sub(left)?.checked_add(1)?;
     let y = event.row.checked_sub(top)?.checked_add(1)?;
     let (rows, columns) = screen.size();
     if matches!(mode, None) || x > columns.get() || y > rows.get() {

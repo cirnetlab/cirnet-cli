@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{self, Read},
     path::{Path, PathBuf},
@@ -326,16 +327,34 @@ pub(super) fn valid_text(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
 }
 
-fn path_key(path: &Path) -> String {
+pub(super) fn path_key(path: &Path) -> OsString {
     let normalized: PathBuf = path.components().collect();
-    let value = normalized.to_string_lossy();
-    if cfg!(windows) {
-        value.to_lowercase()
-    } else {
-        value.into_owned()
+    #[cfg(windows)]
+    if normalized.to_str().is_some() {
+        return crate::workspace::user_path(&normalized)
+            .to_lowercase()
+            .into();
     }
+    normalized.into_os_string()
 }
 
 pub(super) fn same_path(a: &Path, b: &Path) -> bool {
     path_key(a) == path_key(b)
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_identity_reconciles_dos_and_verbatim_spellings() {
+    assert!(same_path(
+        Path::new(r"\\?\E:\Workspace\rÉpo"),
+        Path::new(r"e:\workspace\répo")
+    ));
+    assert!(same_path(
+        Path::new(r"\\?\UNC\Server\Share\rÉpo"),
+        Path::new(r"\\SERVER\share\répo")
+    ));
+    assert!(!same_path(
+        Path::new(r"\\?\UNC\Server\Share\rÉpo"),
+        Path::new(r"\\SERVER\other\répo")
+    ));
 }

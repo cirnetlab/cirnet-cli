@@ -566,6 +566,34 @@ fn output_frame(menu: &mut Menu, size: (u16, u16), color: bool) -> Frame {
     frame
 }
 
+pub(super) fn overlay_prompt(menu: &mut Menu, mut frame: Frame, color: bool) -> Frame {
+    menu.refresh_suggestions();
+    frame.menu = None;
+    frame.readable = None;
+    frame.feedback_row = None;
+    frame.cursor = None;
+    frame.input = None;
+    frame.input_border = None;
+    frame.suggestions = None;
+    let Layout {
+        margin,
+        width,
+        height,
+        ..
+    } = Layout::new(frame.size);
+    if width > 0
+        && height > 0
+        && let Some(prompt) = menu.prompt.as_ref()
+    {
+        let available = height.min(if height > 9 { 8 } else { 4 });
+        let palette = Palette::new(prompt, width, available, true, true);
+        let row = height - palette.rows();
+        palette_rows(&mut frame, &palette, row, margin, menu.vi, color);
+    }
+    menu.interaction.decorate(&mut frame, menu.vi);
+    frame
+}
+
 pub(super) fn frame(menu: &mut Menu, size: (u16, u16), banner: bool, color: bool) -> Frame {
     menu.refresh_suggestions();
     let mut frame = if size.1 == 0 || size.0 <= 1 {

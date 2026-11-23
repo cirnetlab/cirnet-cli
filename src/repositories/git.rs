@@ -1,8 +1,10 @@
 use std::{
     borrow::Cow,
-    fmt, fs,
+    collections::{HashMap, VecDeque},
+    fmt, fs, io,
     path::{Component, Path, PathBuf},
     process::{Command, Output, Stdio},
+    sync::{LazyLock, Mutex},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -21,6 +23,15 @@ pub enum GitStatus {
     Untracked,
     Conflicted,
     Detached,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitDetails {
+    pub short_revision: String,
+    pub author: String,
+    pub timestamp: String,
+    pub message: String,
 }
 
 impl fmt::Display for GitStatus {
@@ -48,14 +59,14 @@ pub struct Checkout {
     pub ahead: Option<usize>,
     pub behind: Option<usize>,
     pub status: GitStatus,
-    pub last_commit: Option<String>,
+    pub commit: Option<CommitDetails>,
     pub modified: bool,
     pub untracked: bool,
     pub conflicted: bool,
     #[serde(skip)]
     git_dir: PathBuf,
     #[serde(skip)]
-    head: Option<String>,
+    pub(super) head: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -136,13 +147,9 @@ fn git_path(path: &Path) -> Cow<'_, Path> {
     // verbatim path returned by fs::canonicalize on this platform.
     #[cfg(windows)]
     if let Some(text) = path.to_str() {
-        if let Some(network) = text.strip_prefix(r"\\?\UNC\") {
-            return Cow::Owned(PathBuf::from(format!(r"\\{network}")));
-        }
-        if let Some(disk) = text.strip_prefix(r"\\?\")
-            && disk.as_bytes().get(1) == Some(&b':')
-        {
-            return Cow::Owned(PathBuf::from(disk));
+        let visible = crate::workspace::user_path(path);
+        if visible != text {
+            return Cow::Owned(PathBuf::from(visible.as_ref()));
         }
     }
     Cow::Borrowed(path)
@@ -155,17 +162,68 @@ fn capture(command: &mut Command) -> Result<Output> {
     ))
 }
 
+#[derive(Debug)]
+struct InaccessibleGit;
+
+impl fmt::Display for InaccessibleGit {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        out.write_str(crate::localization::message([
+            "Git could not access the checkout",
+            "Git không thể truy cập checkout",
+        ]))
+    }
+}
+
+impl std::error::Error for InaccessibleGit {}
+
+pub(super) fn failure_state(path: &Path, error: &anyhow::Error) -> &'static str {
+    match fs::metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => "missing",
+        Err(_) => "inaccessible",
+        Ok(_) if error.downcast_ref::<InaccessibleGit>().is_some() => "inaccessible",
+        Ok(_)
+            if error.chain().any(|cause| {
+                cause.downcast_ref::<io::Error>().is_some_and(|e| {
+                    matches!(
+                        e.kind(),
+                        io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound
+                    )
+                })
+            }) =>
+        {
+            "inaccessible"
+        }
+        Ok(_) => "invalid",
+    }
+}
+
 fn checked(result: Output) -> Result<Vec<u8>> {
     if !result.status.success() {
         let detail = sanitize_console_output(&result.stderr);
-        return Err(anyhow::Error::msg(Diagnostic::new(|vi| {
+        let error = anyhow::Error::msg(Diagnostic::new(|vi| {
             let operation = if vi {
                 "Lệnh Git thất bại"
             } else {
                 "Git command failed"
             };
             format!("{operation} ({}) {}", result.status, detail.trim())
-        })));
+        }));
+        let text = detail.to_ascii_lowercase();
+        return Err(
+            if [
+                "dubious ownership",
+                "permission denied",
+                "access is denied",
+                "operation not permitted",
+            ]
+            .iter()
+            .any(|message| text.contains(message))
+            {
+                error.context(InaccessibleGit)
+            } else {
+                error
+            },
+        );
     }
     Ok(result.stdout)
 }
@@ -214,7 +272,31 @@ fn worktree_root(path: &Path) -> Result<PathBuf> {
 }
 
 fn locations(path: &Path) -> Result<(PathBuf, PathBuf, PathBuf)> {
-    let path = worktree_root(path)?;
+    let path = fs::canonicalize(path)?;
+    let paths = raw_text(git(&path).args([
+        "rev-parse",
+        "--path-format=absolute",
+        "--show-toplevel",
+        "--absolute-git-dir",
+        "--git-common-dir",
+    ]))?;
+    let lines: Vec<_> = paths.lines().collect();
+    if let [root, git_dir, common_dir] = lines.as_slice() {
+        ensure!(
+            fs::canonicalize(root)? == path,
+            diagnostic(
+                "Use the root of an independent Git worktree.",
+                "Hãy dùng thư mục gốc của một cây làm việc Git độc lập.",
+            )
+        );
+        return Ok((
+            path,
+            fs::canonicalize(git_dir)?,
+            fs::canonicalize(common_dir)?,
+        ));
+    }
+    // Paths with embedded newlines require individual Git queries.
+    let path = worktree_root(&path)?;
     let git_dir = raw_text(git(&path).args(["rev-parse", "--absolute-git-dir"]))?;
     let common_dir =
         raw_text(git(&path).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]))?;
@@ -275,7 +357,9 @@ fn sanitized_url(url: &str) -> Option<String> {
     if Path::new(url).is_absolute() {
         return Some(url.to_owned());
     }
-    let (host, path) = url.split_once(':')?;
+    let Some((host, path)) = url.split_once(':') else {
+        return Some(url.to_owned());
+    };
     let host_name = host.rsplit('@').next()?;
     let user = if host.starts_with("git@") { "git@" } else { "" };
     if host_name
@@ -315,22 +399,27 @@ pub fn github_slug(url: &str) -> Option<String> {
 }
 
 pub fn inspect(path: &Path, remote: &str) -> Result<Checkout> {
+    inspect_checkout(path, Some(remote))
+}
+
+pub(super) fn inspect_discovered(path: &Path) -> Result<Checkout> {
+    inspect_checkout(path, None)
+}
+
+fn inspect_checkout(path: &Path, remote: Option<&str>) -> Result<Checkout> {
     let (path, git_dir, common_dir) = locations(path)?;
-    let origin = remote_urls(&path, remote, false)?.into_iter().next();
-    let remote_url = origin.as_deref().and_then(sanitized_url);
-    let slug = origin.as_deref().and_then(github_slug);
     let mut checkout = Checkout {
         path,
         common_dir,
-        remote: remote.to_owned(),
-        remote_url,
-        slug,
+        remote: remote.unwrap_or("origin").to_owned(),
+        remote_url: None,
+        slug: None,
         branch: None,
         upstream: None,
         ahead: None,
         behind: None,
         status: GitStatus::Clean,
-        last_commit: None,
+        commit: None,
         modified: false,
         untracked: false,
         conflicted: false,
@@ -341,22 +430,102 @@ pub fn inspect(path: &Path, remote: &str) -> Result<Checkout> {
         "status",
         "--porcelain=v2",
         "--branch",
+        "--ahead-behind",
         "-z",
         "--untracked-files=normal",
         "--ignore-submodules=none",
     ]))?)?;
     parse_status(&mut checkout, &records)?;
-    if checkout.head.is_some() {
-        checkout.last_commit = Some(perform(git(&checkout.path).args([
-            "log",
-            "-1",
-            "--no-show-signature",
-            "--format=%h %s",
-            "HEAD",
-            "--",
-        ]))?);
+    let mut url = remote_urls(&checkout.path, &checkout.remote, false)?
+        .into_iter()
+        .next();
+    if url.is_none() && remote.is_none() {
+        let names = raw_text(git(&checkout.path).arg("remote"))?;
+        let mut names = names.lines().filter(|name| valid_remote(name));
+        let first = names.next();
+        let tracked = checkout.upstream.as_deref().and_then(|upstream| {
+            first
+                .into_iter()
+                .chain(names.clone())
+                .filter(|name| {
+                    upstream
+                        .strip_prefix(name)
+                        .is_some_and(|rest| rest.starts_with('/'))
+                })
+                .max_by_key(|name| name.len())
+        });
+        if let Some(name) = tracked.or_else(|| first.filter(|_| names.next().is_none())) {
+            checkout.remote = name.to_owned();
+            url = remote_urls(&checkout.path, name, false)?.into_iter().next();
+        }
     }
+    checkout.remote_url = url.as_deref().and_then(sanitized_url);
+    checkout.slug = url.as_deref().and_then(github_slug);
+    checkout.commit = checkout
+        .head
+        .as_deref()
+        .and_then(|head| commit_details(&checkout, head).ok());
     Ok(checkout)
+}
+
+const COMMIT_CACHE_LIMIT: usize = 1024;
+
+#[derive(Default)]
+struct CommitCache {
+    entries: HashMap<(PathBuf, String), CommitDetails>,
+    order: VecDeque<(PathBuf, String)>,
+}
+
+// Commit objects are immutable. Reuse their details across refreshes while
+// running status and reading the configured remote again for each worktree.
+static COMMITS: LazyLock<Mutex<CommitCache>> = LazyLock::new(Mutex::default);
+
+fn commit_details(checkout: &Checkout, revision: &str) -> Result<CommitDetails> {
+    let key = (checkout.common_dir.clone(), revision.to_owned());
+    if let Some(commit) = COMMITS.lock().expect("commit cache lock").entries.get(&key) {
+        return Ok(commit.clone());
+    }
+    let raw = checked(capture(
+        git(&checkout.path)
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .args([
+                "log",
+                "-1",
+                "--abbrev=12",
+                "--no-show-signature",
+                "--encoding=UTF-8",
+                "--format=%h%x00%an%x00%aI%x00%B",
+                revision,
+                "--",
+            ]),
+    )?)?;
+    let mut fields = raw.splitn(4, |&byte| byte == 0);
+    let [Some(short), Some(author), Some(timestamp), Some(message)] =
+        std::array::from_fn(|_| fields.next())
+    else {
+        anyhow::bail!("Unexpected Git commit metadata");
+    };
+    let commit = CommitDetails {
+        short_revision: sanitize_console_output(short),
+        author: sanitize_console_output(author),
+        timestamp: sanitize_console_output(timestamp),
+        message: sanitize_console_output(message)
+            .trim_end_matches(['\r', '\n'])
+            .to_owned(),
+    };
+    if raw.len() <= 16 * 1024 {
+        let mut cache = COMMITS.lock().expect("commit cache lock");
+        if !cache.entries.contains_key(&key) {
+            if cache.entries.len() >= COMMIT_CACHE_LIMIT
+                && let Some(oldest) = cache.order.pop_front()
+            {
+                cache.entries.remove(&oldest);
+            }
+            cache.entries.insert(key.clone(), commit.clone());
+            cache.order.push_back(key);
+        }
+    }
+    Ok(commit)
 }
 
 fn parse_status(checkout: &mut Checkout, records: &[u8]) -> Result<()> {
@@ -407,6 +576,13 @@ fn parse_status(checkout: &mut Checkout, records: &[u8]) -> Result<()> {
 const MAX_DISCOVERY_DEPTH: usize = 12;
 
 pub fn discover(root: &Path, depth: usize) -> Result<Vec<PathBuf>> {
+    Ok(discovery_candidates(root, depth)?
+        .into_iter()
+        .filter(|path| worktree_root(path).is_ok())
+        .collect())
+}
+
+pub(super) fn discovery_candidates(root: &Path, depth: usize) -> Result<Vec<PathBuf>> {
     ensure!(
         depth <= MAX_DISCOVERY_DEPTH,
         diagnostic(
@@ -438,9 +614,8 @@ pub fn discover(root: &Path, depth: usize) -> Result<Vec<PathBuf>> {
         }
         if fs::symlink_metadata(path.join(".git"))
             .is_ok_and(|metadata| !is_link(&metadata) && (metadata.is_file() || metadata.is_dir()))
-            && let Ok(canonical) = worktree_root(&path)
         {
-            found.push(canonical);
+            found.push(path.clone());
         }
         if level >= depth {
             continue;

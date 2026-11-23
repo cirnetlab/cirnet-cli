@@ -2,6 +2,7 @@ mod cancel;
 mod commands;
 mod git;
 mod github;
+mod inventory;
 mod messages;
 mod registry;
 mod sync;
@@ -9,7 +10,9 @@ mod sync;
 pub(crate) use commands::{command, description};
 
 use std::{
+    borrow::Cow,
     collections::{BTreeSet, HashSet},
+    ffi::OsString,
     path::{Path, PathBuf},
 };
 
@@ -20,7 +23,7 @@ use serde_json::{Value, json};
 
 use crate::{
     localization::{self, message, set_language},
-    workspace::{Repo, Workspace, canonical},
+    workspace::{Repo, Workspace, canonical, user_path},
 };
 
 use self::{
@@ -39,15 +42,26 @@ pub(crate) struct Row {
     pub alias: Option<String>,
     pub path: Option<PathBuf>,
     pub branch: Option<String>,
+    pub upstream: Option<String>,
+    pub preferred_branch: Option<String>,
+    pub detached: bool,
+    pub unborn: bool,
     pub state: String,
     pub ahead: Option<usize>,
     pub behind: Option<usize>,
     pub revision: Option<String>,
+    pub short_revision: Option<String>,
+    pub commit_message: Option<String>,
+    pub commit_author: Option<String>,
+    pub commit_timestamp: Option<String>,
     pub groups: Vec<String>,
     pub remote: Option<String>,
+    pub remote_name: Option<String>,
+    pub remote_url: Option<String>,
     pub shell: Option<String>,
     pub active: bool,
     pub registered: bool,
+    pub linked: bool,
     pub last_verified: Option<u64>,
     pub last_sync: Option<u64>,
     pub private: Option<bool>,
@@ -66,12 +80,37 @@ impl Row {
 
     fn apply_checkout(&mut self, checkout: Checkout) {
         self.path = Some(checkout.path);
+        self.detached = checkout.branch.is_none();
+        self.unborn = checkout.branch.is_some() && checkout.head.is_none();
         self.branch = checkout.branch;
+        self.upstream = checkout.upstream;
         self.state = checkout.status.to_string();
+        self.remote_name = checkout.remote_url.as_ref().map(|_| checkout.remote);
+        self.remote = checkout.slug.or_else(|| checkout.remote_url.clone());
+        self.remote_url = checkout.remote_url;
         self.ahead = checkout.ahead;
         self.behind = checkout.behind;
-        self.revision = checkout.last_commit;
+        self.revision = checkout.head;
+        self.short_revision = self
+            .revision
+            .as_deref()
+            .and_then(|sha| sha.get(..12))
+            .map(str::to_owned);
+        if let Some(commit) = checkout.commit {
+            self.short_revision = Some(commit.short_revision);
+            self.commit_message = Some(commit.message);
+            self.commit_author = Some(commit.author);
+            self.commit_timestamp = Some(commit.timestamp);
+        }
         self.last_verified = Some(now());
+    }
+
+    pub(crate) fn display_path(&self) -> Option<Cow<'_, str>> {
+        self.path.as_deref().map(user_path)
+    }
+
+    pub(crate) fn path_identity(&self) -> Option<OsString> {
+        self.path.as_deref().map(registry::path_key)
     }
 }
 
@@ -114,7 +153,8 @@ pub(crate) fn context_refreshing() -> &'static str {
 pub(crate) type ActiveContext = Option<(PathBuf, Option<String>)>;
 
 pub(crate) fn active_context(workspace: &Workspace, flags: &ArgMatches) -> Result<ActiveContext> {
-    let registry = store(workspace, flags)?.load()?;
+    let store = store(workspace, flags)?;
+    let registry = store.load()?;
     let Some(entry) = registry
         .active
         .as_ref()
@@ -122,11 +162,8 @@ pub(crate) fn active_context(workspace: &Workspace, flags: &ArgMatches) -> Resul
     else {
         return Ok(None);
     };
-    let path = entry
-        .path
-        .as_ref()
-        .ok_or_else(|| anyhow!("{}", msg::get(msg::LOCAL_REQUIRED)))?;
-    let actual = checked_checkout(path, &entry.remote, entry.slug.as_deref())?;
+    ensure!(entry.path.is_some(), "{}", msg::get(msg::LOCAL_REQUIRED));
+    let actual = registered_checkout(workspace, &store, &registry, entry)?;
     Ok(Some((actual.path, entry.shell.clone())))
 }
 
@@ -141,7 +178,8 @@ pub(crate) fn completion_values(workspace: &Workspace, flags: &ArgMatches) -> Re
         values.extend(
             entry
                 .path
-                .and_then(|path| path.into_os_string().into_string().ok()),
+                .as_deref()
+                .map(|path| user_path(path).into_owned()),
         );
     }
     if let Some(catalog) = read_catalog(&store)? {
@@ -158,43 +196,39 @@ pub(crate) fn group_names(workspace: &Workspace, args: &ArgMatches) -> Result<Ve
     Ok(store(workspace, args)?.load()?.groups.into_iter().collect())
 }
 
-fn record_row(record: &Record, active: Option<&str>, live: bool) -> Row {
+fn record_row(record: &Record, active: Option<&str>) -> Row {
     let state = if record.path.is_none() {
         "uncloned"
     } else {
         record.last_state.as_deref().unwrap_or("missing")
     };
-    let mut row = Row {
+    Row {
         selector: record.id.clone(),
         name: record.name.clone(),
         alias: record.alias.clone(),
         path: record.path.clone(),
-        branch: record.last_branch.clone(),
+        preferred_branch: record.preferred_branch.clone(),
         state: state.into(),
         groups: record.groups.iter().cloned().collect(),
         remote: record.slug.clone().or_else(|| record.remote_url.clone()),
+        remote_url: record.remote_url.clone(),
         shell: record.shell.clone(),
         active: active == Some(record.id.as_str()),
         registered: true,
+        linked: record.path.is_some(),
         last_verified: record.last_verified,
         last_sync: record.last_sync,
         ..Row::default()
-    };
-    if live && let Some(path) = &record.path {
-        match checked_checkout(path, &record.remote, record.slug.as_deref()) {
-            Ok(checkout) => row.apply_checkout(checkout),
-            Err(_) => row.state = if path.exists() { "invalid" } else { "missing" }.into(),
-        }
     }
-    row
 }
 
 fn remote_row(repo: &Remote) -> Row {
     Row {
         selector: repo.slug.clone(),
         name: repo.name().into(),
-        branch: Some(repo.default_branch.clone()),
+        branch: (!repo.default_branch.is_empty()).then(|| repo.default_branch.clone()),
         remote: Some(repo.slug.clone()),
+        remote_url: Some(repo.url()),
         private: Some(repo.private),
         archived: Some(repo.archived),
         ..Row::new(String::new(), String::new(), "available")
@@ -255,16 +289,56 @@ fn local_path(workspace: &Workspace, value: &str) -> PathBuf {
     }
 }
 
-fn target_for(workspace: &Workspace, registry: &Registry, value: &str) -> Result<Target> {
+fn registered_checkout(
+    workspace: &Workspace,
+    store: &Store,
+    registry: &Registry,
+    record: &Record,
+) -> Result<Checkout> {
+    if let Some(path) = &record.path {
+        let checkout = git::inspect(path, &record.remote)?;
+        let catalog = record
+            .github_id
+            .map(|_| read_catalog(store))
+            .transpose()?
+            .flatten();
+        inventory::verify_record(
+            &checkout,
+            record,
+            inventory::record_remote(catalog.as_ref(), record),
+            inventory::checkout_remote(catalog.as_ref(), &checkout),
+        )?;
+        return Ok(checkout);
+    }
+    let catalog = read_catalog(store)?;
+    let path = rows(workspace, registry, catalog.as_ref(), &workspace.root)?
+        .into_iter()
+        .find(|row| row.selector == record.id)
+        .and_then(|row| row.path)
+        .ok_or_else(|| anyhow!("{}", msg::get(msg::LOCAL_REQUIRED)))?;
+    let checkout = git::inspect(&path, &record.remote)?;
+    inventory::verify_record(
+        &checkout,
+        record,
+        inventory::record_remote(catalog.as_ref(), record),
+        inventory::checkout_remote(catalog.as_ref(), &checkout),
+    )?;
+    Ok(checkout)
+}
+
+fn target_for(
+    workspace: &Workspace,
+    store: &Store,
+    registry: &Registry,
+    value: &str,
+) -> Result<Target> {
     if let Some(index) = registry.index(value, &workspace.root)? {
         let record = &registry.records[index];
+        let checkout = registered_checkout(workspace, store, registry, record)?;
         return Ok(Target {
-            path: record
-                .path
-                .clone()
-                .ok_or_else(|| anyhow!("{} {value}", msg::get(msg::LOCAL_REQUIRED)))?,
-            remote: record.remote.clone(),
-            slug: record.slug.clone(),
+            path: checkout.path,
+            remote: checkout.remote,
+            slug: checkout.slug,
         });
     }
     let path = local_path(workspace, value);
@@ -272,7 +346,11 @@ fn target_for(workspace: &Workspace, registry: &Registry, value: &str) -> Result
         .into_iter()
         .find(|entry| entry.key() == value || entry.name() == value)
         .map(|entry| format!("cirnetlab/{}", entry.name()));
-    let checkout = checked_checkout(&path, "origin", expected.as_deref())?;
+    let checkout = if expected.is_some() {
+        checked_checkout(&path, "origin", expected.as_deref())?
+    } else {
+        git::inspect_discovered(&path)?
+    };
     Ok(Target {
         path: checkout.path,
         remote: checkout.remote,
@@ -285,16 +363,16 @@ pub(crate) fn terminal_context(
     args: &ArgMatches,
     value: &str,
 ) -> Result<(String, PathBuf, Option<String>)> {
-    let registry = store(workspace, args)?.load()?;
+    let store = store(workspace, args)?;
+    let registry = store.load()?;
     let index = registry.index(value, &workspace.root)?;
-    let target = target_for(workspace, &registry, value)?;
-    let checkout = checked_checkout(&target.path, &target.remote, target.slug.as_deref())?;
+    let target = target_for(workspace, &store, &registry, value)?;
     // The canonical directory is part of the key. Relinking a record cannot silently move a live terminal.
     let key = index.map_or_else(|| value.into(), |index| registry.records[index].id.clone());
-    let key = format!("{key} · {}", checkout.path.display());
+    let key = format!("{key} · {}", user_path(&target.path));
     Ok((
         key,
-        checkout.path,
+        target.path,
         index.and_then(|index| registry.records[index].shell.clone()),
     ))
 }
@@ -312,50 +390,7 @@ fn rows(
     catalog: Option<&Catalog>,
     root: &Path,
 ) -> Result<Vec<Row>> {
-    let mut rows: Vec<_> = registry
-        .records
-        .iter()
-        .map(|record| record_row(record, registry.active.as_deref(), true))
-        .collect();
-    let candidates = git::discover(root, 2)?;
-    for candidate in candidates {
-        if rows.iter().any(|row| {
-            row.path
-                .as_ref()
-                .is_some_and(|path| same_path(path, &candidate))
-        }) {
-            continue;
-        }
-        let name = candidate
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        let mut row = Row::new(candidate.to_string_lossy().into_owned(), name, "local");
-        row.path = Some(candidate);
-        rows.push(row);
-    }
-    if let Some(catalog) = catalog {
-        for repo in &catalog.repositories {
-            if !registry.records.iter().any(|record| {
-                record.github_id == Some(repo.id)
-                    || record
-                        .slug
-                        .as_deref()
-                        .is_some_and(|slug| slug.eq_ignore_ascii_case(&repo.slug))
-            }) {
-                rows.push(remote_row(repo));
-            }
-        }
-    }
-    // The workspace is not itself registered merely by viewing it.
-    rows.retain(|row| {
-        row.path
-            .as_ref()
-            .is_none_or(|path| !same_path(path, &workspace.root))
-            || row.registered
-    });
-    Ok(rows)
+    inventory::rows(workspace, registry, catalog, root)
 }
 
 fn names(args: &ArgMatches) -> Vec<String> {
@@ -490,24 +525,31 @@ fn status(
         return Ok(json!({"workspace":workspace.root,"repositories":workspace.inventory(true)}));
     }
     let active = registry.active.as_deref();
+    let live_record = |record: &Record| {
+        let mut row = record_row(record, active);
+        match registered_checkout(workspace, store, registry, record) {
+            Ok(checkout) => row.apply_checkout(checkout),
+            Err(error) => {
+                if let Some(path) = &record.path {
+                    row.state = git::failure_state(path, &error).into();
+                }
+            }
+        }
+        row
+    };
     let rows: Vec<_> = if values.is_empty() {
-        registry
-            .records
-            .iter()
-            .map(|record| record_row(record, active, true))
-            .collect()
+        registry.records.iter().map(live_record).collect()
     } else {
         values
             .iter()
             .map(|value| {
                 if let Some(index) = registry.index(value, &workspace.root)? {
-                    Ok(record_row(&registry.records[index], active, true))
+                    Ok(live_record(&registry.records[index]))
                 } else {
-                    let target = target_for(workspace, registry, value)?;
+                    let target = target_for(workspace, store, registry, value)?;
                     let checkout =
                         checked_checkout(&target.path, &target.remote, target.slug.as_deref())?;
                     let mut row = Row::new(value.clone(), value.clone(), "local");
-                    row.remote.clone_from(&checkout.slug);
                     row.apply_checkout(checkout);
                     Ok(row)
                 }
@@ -520,12 +562,17 @@ fn status(
     {
         store.edit(|saved| {
             for row in &rows {
-                if let Some(record) = saved
-                    .records
-                    .iter_mut()
-                    .find(|record| row.selector == record.id && row.path == record.path)
-                    && !matches!(row.state.as_str(), "missing" | "invalid" | "uncloned")
-                {
+                if let Some(record) = saved.records.iter_mut().find(|record| {
+                    row.selector == record.id
+                        && row
+                            .path
+                            .as_deref()
+                            .zip(record.path.as_deref())
+                            .is_some_and(|(row, saved)| same_path(row, saved))
+                }) && !matches!(
+                    row.state.as_str(),
+                    "missing" | "invalid" | "inaccessible" | "uncloned"
+                ) {
                     record.last_verified = row.last_verified;
                     record.last_branch.clone_from(&row.branch);
                     record.last_state = Some(row.state.clone());
@@ -690,7 +737,7 @@ fn clone(
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
             "{} {}",
             msg::get(msg::DEST_OCCUPIED),
-            destination.display()
+            user_path(&destination)
         );
         if args.get_flag("all") {
             let existing = registry.records.iter().find_map(|record| {
@@ -973,7 +1020,7 @@ fn sync_repositories(
     let mut operations = Vec::new();
     let mut paths = BTreeSet::new();
     for value in values {
-        match target_for(workspace,registry,&value) {
+        match target_for(workspace,store,registry,&value) {
             Ok(target) if paths.insert(target.path.clone()) => requests.push(target),
             Ok(_) => (),
             Err(error) => operations.push(json!({"repo":value,"operation":operation,"dryRun":dry,"state":"failed","detail":localization::report_diagnostic(&error)})),
@@ -994,9 +1041,9 @@ fn sync_repositories(
                 return;
             }
             match progress {
-                SyncProgress::Started(path) => eprintln!("{started} · {}", path.display()),
+                SyncProgress::Started(path) => eprintln!("{started} · {}", user_path(&path)),
                 SyncProgress::Finished(result) => {
-                    eprintln!("{finished} · {}", result.path.display())
+                    eprintln!("{finished} · {}", user_path(&result.path))
                 }
             }
         },
@@ -1063,6 +1110,13 @@ pub(crate) fn execute(
                 let query = query.to_lowercase();
                 rows.retain(|row| {
                     row.name.to_lowercase().contains(&query)
+                        || [&row.alias, &row.remote]
+                            .into_iter()
+                            .flatten()
+                            .any(|value| value.to_lowercase().contains(&query))
+                        || row
+                            .display_path()
+                            .is_some_and(|path| path.to_lowercase().contains(&query))
                         || row.selector.to_lowercase().contains(&query)
                 });
             }
@@ -1087,13 +1141,10 @@ pub(crate) fn execute(
         "switch" => store.edit(|saved| {
             let index = registered(saved, workspace, named(options))?;
             let entry = &saved.records[index];
-            let path = entry
-                .path
-                .as_ref()
-                .ok_or_else(|| anyhow!("{}", msg::get(msg::LOCAL_REQUIRED)))?;
-            checked_checkout(path, &entry.remote, entry.slug.as_deref())?;
+            ensure!(entry.path.is_some(), "{}", msg::get(msg::LOCAL_REQUIRED));
+            let checkout = registered_checkout(workspace, &store, saved, entry)?;
             saved.active = Some(entry.id.clone());
-            Ok(json!({"active":saved.active,"path":path}))
+            Ok(json!({"active":saved.active,"path":checkout.path}))
         }),
         "fetch" | "update" => sync_repositories(
             workspace,
@@ -1108,7 +1159,7 @@ pub(crate) fn execute(
             flags.get_flag("json"),
         ),
         "diff" | "log" | "branches" | "worktrees" | "remotes" => {
-            let target = target_for(workspace, &registry, named(options))?;
+            let target = target_for(workspace, &store, &registry, named(options))?;
             checked_checkout(&target.path, &target.remote, target.slug.as_deref())?;
             let read = match action {
                 "diff" if options.get_flag("staged") => ReadAction::StagedDiff,
@@ -1121,7 +1172,7 @@ pub(crate) fn execute(
             Ok(json!({"path":target.path,"content":git::read(&target.path,&target.remote,read)?}))
         }
         "branch" | "worktree" | "stage" | "commit" | "push" => {
-            let target = target_for(workspace, &registry, named(options))?;
+            let target = target_for(workspace, &store, &registry, named(options))?;
             let branch = || {
                 options
                     .get_one::<String>("branch")
