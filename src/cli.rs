@@ -397,6 +397,7 @@ fn render_report(output: &mut String, value: &Value, key: &str, indent: usize, v
                 "path"
                     | "workspace"
                     | "commonDir"
+                    | "selector"
                     | "stateDirectory"
                     | "logDirectory"
                     | "dataDirectory"
@@ -462,6 +463,39 @@ mod tests {
         }
         assert_eq!(report["path"], drive);
         assert_eq!(report["commonDir"], network);
+    }
+
+    #[test]
+    fn human_discovery_report_normalizes_only_path_shaped_selectors() {
+        let drive = r"\\?\E:\repo\alpha";
+        let share = r"\\?\UNC\server\share\beta";
+        let report = json!({
+            "repositories": [
+                { "selector": drive, "path": drive, "commitMessage": drive },
+                { "selector": share, "path": share },
+                { "selector": "r:42" },
+                { "selector": "cirnetlab/example" }
+            ]
+        });
+        for (vi, label) in [(false, "Identifier"), (true, "Định danh")] {
+            let output = human_report(&report, vi);
+            for selector in [
+                r"E:\repo\alpha",
+                r"\\server\share\beta",
+                "r:42",
+                "cirnetlab/example",
+            ] {
+                assert!(
+                    output
+                        .lines()
+                        .any(|line| line.trim() == format!("{label}: {selector}")),
+                    "{output}"
+                );
+            }
+            assert!(output.lines().any(|line| line.ends_with(drive)));
+        }
+        assert_eq!(report["repositories"][0]["selector"], drive);
+        assert_eq!(report["repositories"][1]["selector"], share);
     }
 
     #[test]

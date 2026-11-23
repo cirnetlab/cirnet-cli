@@ -185,6 +185,19 @@ fn command(shell: &str, cwd: &Path, vi: bool) -> Result<CommandBuilder> {
             )
         );
         std::borrow::Cow::Owned(standard)
+    } else if cfg!(windows)
+        && shell == "powershell"
+        && let Some(original) = cwd.to_str()
+    {
+        // PowerShell exposes verbatim paths as provider-qualified locations.
+        // Keep the original path when the standard spelling cannot reach the same directory.
+        let visible = crate::workspace::user_path(cwd);
+        let standard = Path::new(visible.as_ref());
+        if visible != original && std::fs::canonicalize(standard).is_ok_and(|path| path == cwd) {
+            std::borrow::Cow::Owned(standard.to_path_buf())
+        } else {
+            std::borrow::Cow::Borrowed(cwd)
+        }
     } else {
         std::borrow::Cow::Borrowed(cwd)
     };

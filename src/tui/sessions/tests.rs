@@ -115,6 +115,37 @@ fn interactive_shells_keep_working_directories_and_environment_isolated() {
     output_contains(session, "RESULT:[session_a]");
 }
 
+#[cfg(windows)]
+#[test]
+fn powershell_opens_in_the_checkout_with_a_standard_windows_prompt() {
+    if Command::new("pwsh.exe")
+        .args(["-NoLogo", "-NoProfile", "-Command", "exit 0"])
+        .output()
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return;
+    }
+
+    let repos = Repos::new();
+    let checkout = repos.0.join("fixture with spaces");
+    fs::create_dir(&checkout).unwrap();
+    let cwd = fs::canonicalize(checkout).unwrap();
+    let visible = crate::workspace::user_path(&cwd);
+    assert_ne!(cwd.to_str().unwrap(), visible);
+    let session = Session::start(
+        "fixture",
+        &cwd,
+        Some("powershell"),
+        pty_size((240, 24)),
+        false,
+    )
+    .unwrap();
+
+    let prompt = format!("PS {visible}>");
+    output_contains(&session, &prompt);
+    assert_eq!(session.cwd, cwd);
+}
+
 #[test]
 fn terminal_shows_back_in_footer_and_omits_scroll_hints() {
     use super::workspace::State;
