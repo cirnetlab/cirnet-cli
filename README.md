@@ -11,10 +11,18 @@
 </p>
 
 <details>
-<summary>Xem Repository Manager</summary>
+<summary>View Repository Manager</summary>
 
 <p align="center">
   <img src="assets/menu_repository.png" alt="CIRNETLAB Repository Manager" width="750" />
+</p>
+</details>
+
+<details>
+<summary>View Terminal</summary>
+
+<p align="center">
+  <img src="assets/terminal.png" alt="Terminal" width="750" />
 </p>
 </details>
 
