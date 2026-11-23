@@ -17,7 +17,8 @@ use serde_json::{Value, json};
 use crate::{
     build::{self, Candidate, sha},
     environment::{Profile, State, write_json},
-    process::{capture, hidden, isolate_stdio, powershell, run},
+    localization::{MISSING_INVENTORY, START_FAILED, message},
+    process::{capture, hidden, isolate_stdio, powershell, run, sanitize_console_output},
     workspace::{Repo, Workspace},
 };
 use ownership::Process;
@@ -34,8 +35,55 @@ struct Instance {
     supervisor: Process,
     browser_server: Option<Process>,
     dev: bool,
+    #[serde(default)]
+    target: Target,
     native_stopped: bool,
     native_run_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Target {
+    #[default]
+    Interface,
+}
+
+impl Target {
+    pub(crate) const VALUES: [&'static str; 1] = ["interface"];
+
+    pub(crate) fn requested(args: &ArgMatches) -> Option<Self> {
+        args.get_one::<String>("desktop").map(|_| Self::Interface)
+    }
+
+    fn verify(self, requested: Option<Self>) -> Result<()> {
+        if requested.is_some_and(|target| target != self) {
+            bail!(
+                "{}",
+                message([
+                    "The selected profile owns a different target. Run cnl status to identify it.",
+                    "Hồ sơ đang chọn quản lý đích khác. Chạy cnl status để xác định đích."
+                ])
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Mode {
+    Development,
+    Packaged,
+}
+
+impl Mode {
+    fn from_dev(dev: bool) -> Self {
+        if dev {
+            Self::Development
+        } else {
+            Self::Packaged
+        }
+    }
 }
 
 fn read_instance(state: &State) -> Result<Option<Instance>> {
@@ -54,26 +102,52 @@ pub fn verify_ports(ports: &[u16]) -> Result<()> {
         )
         .is_ok()
         {
-            bail!("127.0.0.1:{port} is already in use. Select another port or stop its owner.");
+            bail!(
+                "127.0.0.1:{port} {}",
+                message([
+                    "is already in use. Select another port or stop its owner.",
+                    "đang được sử dụng. Chọn cổng khác hoặc dừng tiến trình đang giữ cổng."
+                ])
+            );
         }
-        TcpListener::bind((Ipv4Addr::LOCALHOST, *port))
-            .with_context(|| format!("Cannot bind 127.0.0.1:{port}; check for another listener or select a different port"))?;
+        TcpListener::bind((Ipv4Addr::LOCALHOST, *port)).with_context(|| {
+            format!(
+                "{} 127.0.0.1:{port}. {}",
+                message(["Cannot bind", "Không thể mở cổng"]),
+                message([
+                    "Check for another listener or select a different port",
+                    "Hãy kiểm tra tiến trình đang lắng nghe hoặc chọn cổng khác"
+                ])
+            )
+        })?;
     }
     Ok(())
 }
 
-pub fn start(workspace: &Workspace, state: &State, args: &ArgMatches, dev: bool) -> Result<Value> {
+pub(crate) fn start(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result<Value> {
     let profile = &state.profile;
-    let open_browser = args.get_flag("open") || args.get_one::<String>("desktop").is_some();
+    let requested = Target::requested(args);
+    let target = requested.unwrap_or_default();
+    let dev = args
+        .get_one::<String>("mode")
+        .is_none_or(|mode| mode == "development");
+    let mode = Mode::from_dev(dev);
+    let open_browser = args.get_flag("open") || requested.is_some();
     if args.get_flag("dry-run") {
         return Ok(
-            json!({"dryRun":true, "mode":if dev {"dev"} else {"native"},"ports":profile,
+            json!({"dryRun":true, "mode":mode,"target":target,"ports":profile,
             "dataDirectory":state.dir.join("data"),"initializeDb":args.get_flag("initialize-db"),
             "receipt":args.get_one::<PathBuf>("receipt"),"openBrowser":open_browser}),
         );
     }
     if !cfg!(all(windows, target_arch = "x86_64")) {
-        bail!("CIRNETLAB native runtime requires Windows x64");
+        bail!(
+            "{}",
+            message([
+                "CIRNETLAB native runtime requires Windows x64",
+                "Runtime native CIRNETLAB yêu cầu Windows x64"
+            ])
+        );
     }
     let _lock = state.lock()?;
     if let Some(prior) = read_instance(state)? {
@@ -84,12 +158,24 @@ pub fn start(workspace: &Workspace, state: &State, args: &ArgMatches, dev: bool)
                 .is_some_and(|process| process.active().unwrap_or(true))
         {
             bail!(
-                "This profile already owns a running process. Inspect cnl status before starting again."
+                "{}",
+                message([
+                    "This profile already owns a running process. Inspect cnl status before starting again.",
+                    "Hồ sơ này đang quản lý một tiến trình. Xem cnl status trước khi khởi động lại."
+                ])
             );
         }
         bail!(
-            "The previous instance exited without a confirmed cnl stop. Inspect {} and use a different profile until shutdown is resolved.",
-            prior.log_dir.display()
+            "{} {}. {}",
+            message([
+                "The previous instance exited without a confirmed cnl stop. Inspect",
+                "Phiên trước đã thoát trước khi xác nhận cnl stop. Hãy kiểm tra"
+            ]),
+            prior.log_dir.display(),
+            message([
+                "Use a different profile until shutdown is resolved",
+                "Dùng hồ sơ khác cho đến khi xử lý xong việc dừng phiên"
+            ])
         );
     }
     let mut ports = vec![profile.port, profile.hardware_port];
@@ -101,8 +187,16 @@ pub fn start(workspace: &Workspace, state: &State, args: &ArgMatches, dev: bool)
     let data = state.dir.join("data");
     if !data.join("cirnet.db").is_file() && !args.get_flag("initialize-db") {
         bail!(
-            "No initialized SQLite database in {}. Use --initialize-db to create a fresh database.",
-            data.display()
+            "{} {}. {}",
+            message([
+                "No initialized SQLite database in",
+                "Chưa có cơ sở dữ liệu SQLite đã khởi tạo trong"
+            ]),
+            data.display(),
+            message([
+                "Use --initialize-db to create a fresh database",
+                "Dùng --initialize-db để tạo cơ sở dữ liệu mới"
+            ])
         );
     }
     let web = if dev {
@@ -144,6 +238,7 @@ pub fn start(workspace: &Workspace, state: &State, args: &ArgMatches, dev: bool)
         supervisor: Process::identify(&supervisor)?,
         browser_server: None,
         dev,
+        target,
         native_stopped: false,
         native_run_id: None,
     };
@@ -160,7 +255,11 @@ pub fn start(workspace: &Workspace, state: &State, args: &ArgMatches, dev: bool)
         let backend = probe(&instance, false)?;
         if backend["healthy"] != true {
             bail!(
-                "Native application failed HTTP, WebSocket, Interface or Hardware RPC readiness: {backend}"
+                "{} · {backend}",
+                message([
+                    "Native application failed HTTP, WebSocket, Interface or Hardware RPC readiness",
+                    "Ứng dụng native chưa sẵn sàng ở HTTP, WebSocket, Interface hoặc Hardware RPC"
+                ])
             );
         }
         if let Some(web) = web {
@@ -188,7 +287,13 @@ pub fn start(workspace: &Workspace, state: &State, args: &ArgMatches, dev: bool)
                 &format!("CIRNET_VITE_READY=http://127.0.0.1:{}", profile.dev_port),
             )?;
             if probe(&instance, true)?["healthy"] != true {
-                bail!("Vite frontend, proxied API or proxied WebSocket is unhealthy");
+                bail!(
+                    "{}",
+                    message([
+                        "Vite frontend, proxied API or proxied WebSocket is unhealthy",
+                        "Giao diện Vite, API qua proxy hoặc WebSocket qua proxy gặp lỗi"
+                    ])
+                );
             }
         }
         Ok(backend)
@@ -204,8 +309,13 @@ pub fn start(workspace: &Workspace, state: &State, args: &ArgMatches, dev: bool)
             if acted {
                 fs::remove_file(&record)?;
             }
-            return Err(error)
-                .with_context(|| format!("Startup failed. See {}", instance.log_dir.display()));
+            return Err(error).with_context(|| {
+                format!(
+                    "{} {}",
+                    message(["Startup failed. See", "Khởi động thất bại. Xem"]),
+                    instance.log_dir.display()
+                )
+            });
         }
     };
     let url = url(&instance);
@@ -220,11 +330,14 @@ pub fn start(workspace: &Workspace, state: &State, args: &ArgMatches, dev: bool)
                 .stderr(Stdio::null()),
         );
         if let Err(error) = command.spawn() {
-            eprintln!("Open {url} in your browser ({error}).");
+            eprintln!(
+                "{} {url} ({error}).",
+                message(["Open in your browser", "Mở bằng trình duyệt"])
+            );
         }
     }
     Ok(
-        json!({"state":"ready","url":url,"native":backend,"ports":profile,"logDirectory":instance.log_dir,
+        json!({"state":"ready","mode":mode,"target":target,"url":url,"native":backend,"ports":profile,"logDirectory":instance.log_dir,
             "receipt":receipt,"manifestSha256":instance.digest}),
     )
 }
@@ -261,16 +374,21 @@ pub fn status(state: &State) -> Result<Value> {
     };
     Ok(
         json!({"state":if healthy {"ready"} else if active {"unhealthy"} else {"exited-without-confirmed-stop"},
+        "mode":Mode::from_dev(instance.dev),"target":instance.target,
         "ports":instance.profile,"url":url(&instance),"supervisorPid":instance.supervisor.pid, "services":services,
         "vitePid":instance.browser_server.as_ref().map(|process| process.pid),
         "native":native,"vite":dev,"logDirectory":instance.log_dir}),
     )
 }
 
-pub fn stop(state: &State, dry: bool) -> Result<Value> {
+pub(crate) fn stop(state: &State, target: Option<Target>, dry: bool) -> Result<Value> {
     if dry {
+        let instance = read_instance(state)?;
+        if let Some(instance) = &instance {
+            instance.target.verify(target)?;
+        }
         return Ok(
-            json!({"dryRun":true,"ownedInstance":read_instance(state)?.is_some(),"stateDirectory":state.dir}),
+            json!({"dryRun":true,"ownedInstance":instance.is_some(),"target":instance.map(|i| i.target).or(target),"stateDirectory":state.dir}),
         );
     }
     if !state.dir.exists() {
@@ -280,6 +398,7 @@ pub fn stop(state: &State, dry: bool) -> Result<Value> {
     let Some(mut instance) = read_instance(state)? else {
         return Ok(json!({"state":"stopped"}));
     };
+    instance.target.verify(target)?;
     shutdown(state, &mut instance)?;
     fs::remove_file(state.dir.join("instance.json"))?;
     Ok(json!({"state":"stopped","logDirectory":instance.log_dir}))
@@ -293,11 +412,15 @@ fn shutdown(state: &State, instance: &mut Instance) -> Result<()> {
         {
             fs::write(instance.log_dir.join("vite.stop"), "")?;
             wait_for_exit(server, Duration::from_secs(15))?;
-            let outcome = fs::read_to_string(instance.log_dir.join("vite.result"))
-                .context("Vite exited without a cleanup receipt")?;
+            let outcome =
+                fs::read_to_string(instance.log_dir.join("vite.result")).context(message([
+                    "Vite exited without a cleanup receipt",
+                    "Vite đã thoát khi chưa có biên nhận dọn dẹp",
+                ]))?;
             if outcome.trim() != "clean" {
                 bail!(
-                    "Vite cleanup {}. See {}",
+                    "{} {} · {}",
+                    message(["Vite cleanup", "Dọn dẹp Vite"]),
                     outcome.trim(),
                     instance.log_dir.display()
                 );
@@ -309,15 +432,33 @@ fn shutdown(state: &State, instance: &mut Instance) -> Result<()> {
         return vite;
     }
     if !instance.supervisor.active()? {
-        bail!("The owned supervisor already exited. Clean native shutdown cannot be confirmed.");
+        bail!(
+            "{}",
+            message([
+                "The owned supervisor already exited. Clean native shutdown cannot be confirmed.",
+                "Supervisor thuộc CLI đã thoát. Không thể xác nhận hệ thống native đã dừng an toàn."
+            ])
+        );
     }
     if sha(&instance.bundle.join("cirnet-native.ps1"))? != instance.launcher_hash {
-        bail!("The selected Stop launcher has changed. Restore the verified file before stopping.");
+        bail!(
+            "{}",
+            message([
+                "The selected Stop launcher has changed. Restore the verified file before stopping.",
+                "Launcher dùng để Stop đã thay đổi. Hãy khôi phục tệp đã kiểm chứng trước khi dừng."
+            ])
+        );
     }
     if let Some(expected) = &instance.native_run_id
         && &native_run_id(state)? != expected
     {
-        bail!("The launcher run identity no longer matches the cnl-owned instance.");
+        bail!(
+            "{}",
+            message([
+                "The launcher run identity no longer matches the cnl-owned instance.",
+                "Định danh phiên launcher không còn khớp với phiên do cnl quản lý."
+            ])
+        );
     }
     run(&mut launcher(
         &instance.bundle,
@@ -335,11 +476,18 @@ fn shutdown(state: &State, instance: &mut Instance) -> Result<()> {
 fn native_run_id(state: &State) -> Result<String> {
     let control: Value =
         serde_json::from_slice(&fs::read(state.dir.join("data/supervisor.json"))?)?;
-    let id = control["id"]
-        .as_str()
-        .context("Missing launcher run identity")?;
+    let id = control["id"].as_str().context(message([
+        "Missing launcher run identity",
+        "Thiếu định danh phiên launcher",
+    ]))?;
     if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("Invalid launcher run identity");
+        bail!(
+            "{}",
+            message([
+                "Invalid launcher run identity",
+                "Định danh phiên launcher không hợp lệ"
+            ])
+        );
     }
     Ok(id.to_owned())
 }
@@ -370,7 +518,13 @@ fn probe(instance: &Instance, dev: bool) -> Result<Value> {
     if !dev {
         let executable = instance.bundle.join("bin/cirnet-remote.exe");
         if sha(&executable)? != instance.remote_hash {
-            bail!("The selected Remote executable changed since startup");
+            bail!(
+                "{}",
+                message([
+                    "The selected Remote executable changed since startup",
+                    "Executable Remote đã thay đổi kể từ khi khởi động"
+                ])
+            );
         }
         let mut command = Command::new(executable);
         for (name, _) in std::env::vars_os() {
@@ -404,20 +558,29 @@ fn runtime_identity(candidate: &Candidate) -> Result<(String, String, String)> {
         serde_json::from_slice(&fs::read(candidate.directory.join("native-manifest.json"))?)?;
     let files = manifest["files"]
         .as_array()
-        .context("Missing candidate inventory")?;
+        .context(message(MISSING_INVENTORY))?;
     let digest = |path: &str| {
         files
             .iter()
             .find(|record| record["path"] == path)
             .and_then(|file| file["sha256"].as_str())
-            .with_context(|| format!("Candidate has no verified {path}"))
+            .with_context(|| {
+                format!(
+                    "{} {path}",
+                    message([
+                        "Candidate is missing the verified file",
+                        "Ứng viên thiếu tệp đã kiểm chứng"
+                    ])
+                )
+            })
     };
     let metadata: Value = serde_json::from_slice(&fs::read(
         candidate.directory.join("web/interface-artifact.json"),
     )?)?;
-    let fingerprint = metadata["sourceFingerprint"]
-        .as_str()
-        .context("Candidate has no Interface source fingerprint")?;
+    let fingerprint = metadata["sourceFingerprint"].as_str().context(message([
+        "Candidate has no Interface source fingerprint",
+        "Ứng viên thiếu mã nhận dạng mã nguồn Interface",
+    ]))?;
     Ok((
         fingerprint.into(),
         digest("cirnet-native.ps1")?.into(),
@@ -453,7 +616,8 @@ fn background(command: &mut Command, log: &Path) -> Result<Child> {
     );
     command.spawn().with_context(|| {
         format!(
-            "Could not start {}",
+            "{} {}",
+            message(START_FAILED),
             command.get_program().to_string_lossy()
         )
     })
@@ -464,7 +628,12 @@ fn wait_for(child: &mut Child, log: &Path, marker: &str) -> Result<()> {
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait()? {
             bail!(
-                "Service exited with {status} before reporting readiness in {}",
+                "{} {status} · {} {}",
+                message(["Service exited with", "Dịch vụ đã thoát với"]),
+                message([
+                    "before reporting readiness in",
+                    "trước khi báo sẵn sàng trong"
+                ]),
                 log.display()
             );
         }
@@ -477,16 +646,155 @@ fn wait_for(child: &mut Child, log: &Path, marker: &str) -> Result<()> {
         }
         thread::sleep(Duration::from_millis(150));
     }
-    bail!("Timed out waiting for readiness in {}", log.display())
+    bail!(
+        "{} {}",
+        message([
+            "Timed out waiting for readiness in",
+            "Hết thời gian chờ báo sẵn sàng trong"
+        ]),
+        log.display()
+    )
 }
 
 fn wait_for_exit(process: &Process, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     while process.active()? {
         if Instant::now() >= deadline {
-            bail!("Owned process {} did not confirm shutdown", process.pid);
+            bail!(
+                "{} {} · {}",
+                message(["Owned process", "Tiến trình do CLI quản lý"]),
+                process.pid,
+                message([
+                    "shutdown could not be confirmed",
+                    "không xác nhận được việc dừng"
+                ])
+            );
         }
         thread::sleep(Duration::from_millis(150));
     }
     Ok(())
+}
+
+pub(crate) fn logs(state: &State, args: &ArgMatches) -> Result<Value> {
+    let directory = state.dir.join("logs");
+    let session = if let Some(instance) = read_instance(state)? {
+        instance.log_dir
+    } else {
+        let latest = match fs::read_dir(&directory) {
+            Ok(entries) => entries
+                .collect::<std::io::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("runtime-"))
+                .max_by_key(|entry| entry.file_name()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        latest
+            .context(message([
+                "No runtime logs for this profile. Use cnl status to check the selected profile",
+                "Hồ sơ này chưa có nhật ký runtime. Dùng cnl status để kiểm tra hồ sơ đã chọn",
+            ]))?
+            .path()
+    };
+    if session.parent() != Some(directory.as_path())
+        || crate::workspace::canonical(&session)? != session
+        || !fs::symlink_metadata(&session)?.is_dir()
+    {
+        bail!(
+            "{}",
+            message([
+                "Runtime log session is outside the selected profile",
+                "Thư mục nhật ký runtime nằm ngoài hồ sơ đã chọn"
+            ])
+        );
+    }
+    let service = args.get_one::<String>("service").expect("default service");
+    let path = session.join(format!("{service}.log"));
+    if !fs::symlink_metadata(&path)
+        .with_context(|| {
+            format!(
+                "{} {service} · {}",
+                message(["Missing runtime log", "Thiếu nhật ký runtime"]),
+                session.display()
+            )
+        })?
+        .is_file()
+        || crate::workspace::canonical(&path)? != path
+    {
+        bail!(
+            "{}",
+            message([
+                "Expected an ordinary runtime log inside the selected profile",
+                "Nhật ký runtime phải là tệp thường trong hồ sơ đã chọn"
+            ])
+        );
+    }
+    let lines = usize::from(*args.get_one::<u16>("lines").expect("default line count"));
+    Ok(json!({"service":service,"path":path,"content":log_tail(File::open(&path)?, lines)?}))
+}
+
+fn log_tail(
+    mut reader: impl std::io::Read + std::io::Seek,
+    lines: usize,
+) -> std::io::Result<String> {
+    use std::io::{Read, SeekFrom};
+    const LIMIT: u64 = 64 * 1024;
+    let end = reader.seek(SeekFrom::End(0))?;
+    let start = end.saturating_sub(LIMIT);
+    reader.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    reader.take(LIMIT).read_to_end(&mut bytes)?;
+    let bytes = if start == 0 {
+        bytes.as_slice()
+    } else {
+        bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(&[][..], |offset| &bytes[offset + 1..])
+    };
+    let text = sanitize_console_output(bytes);
+    let mut tail = text.lines().rev().take(lines).collect::<Vec<_>>();
+    tail.reverse();
+    Ok(tail.join("\n"))
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn log_tail_caps_bytes_and_rows_and_strips_secrets() {
+        let input = format!(
+            "{}\nignored\n\x1b[31mready\x1b[0m\nAuthorization: Bearer sample\n",
+            "x".repeat(65536)
+        );
+        assert_eq!(
+            log_tail(Cursor::new(input), 2).unwrap(),
+            "ready\n[redacted]"
+        );
+        assert_eq!(log_tail(Cursor::new("x".repeat(65537)), 2).unwrap(), "");
+        let key =
+            "\n-----BEGIN RSA PRIVATE KEY-----\nprivate body\n-----END RSA PRIVATE KEY-----\nready";
+        assert_eq!(log_tail(Cursor::new(key), 2).unwrap(), "[redacted]\nready");
+    }
+
+    #[test]
+    fn legacy_instance_records_resolve_to_the_interface_target() {
+        let record = json!({
+            "profile": {},
+            "bundle": "fixture", "digest": "", "launcher_hash": "",
+            "remote_hash": "", "fingerprint": "", "log_dir": "fixture",
+            "supervisor": { "pid": 1, "created": 0 },
+            "browser_server": null, "dev": true, "native_stopped": false,
+            "native_run_id": null
+        });
+        let saved: Instance = serde_json::from_value(record.clone()).unwrap();
+        assert_eq!(saved.target, Target::Interface);
+        assert!(saved.target.verify(Some(Target::Interface)).is_ok());
+        assert_eq!(serde_json::to_value(&saved).unwrap()["target"], "interface");
+        let mut unsupported = record;
+        unsupported["target"] = json!("unknown");
+        assert!(serde_json::from_value::<Instance>(unsupported).is_err());
+    }
 }

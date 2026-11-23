@@ -34,7 +34,7 @@ The rest of this reference uses `cnl`. If it is not on PATH, call the executable
 | `--state-dir <ABSOLUTE_DIR>` | Select an absolute directory outside Git checkouts for profiles, local SQLite databases, and build artifacts. The default is a per-workspace directory under `%LOCALAPPDATA%\CIRNETLAB`. |
 | `--profile <NAME>` | Select a profile. Default `windows-x64`. Use letters, digits, hyphens or underscores. Use the same workspace, state directory and profile for all steps in one lifecycle. |
 | `--json` | Write the structured report to stdout. Subprocess progress on stdout is suppressed in this mode. Subprocess diagnostics stay on stderr. |
-| `--lang en\|vi` | Set the interactive terminal language. Default `en`. |
+| `--lang en\|vi` | Select the CLI and interactive terminal language. Default `en`. |
 | `-h`, `--help` | Show help for the selected command. |
 | `-V`, `--version` | Show the CLI version at the top level. |
 
@@ -54,14 +54,17 @@ The rest of this reference uses `cnl`. If it is not on PATH, call the executable
 | `cnl setup --browser [--receipt <RECEIPT>] [--dry-run]` | Install the selected candidate's Chromium in the profile. |
 | `cnl repos discover` | List expected checkout locations and whether each checkout is present. |
 | `cnl repos status` | Show branches, revisions, working tree changes, remotes and dependency availability. |
-| `cnl repos clone <KEY>... [--dry-run]` | Clone the named repositories into missing destinations. Requires Git access to the selected repositories. |
-| `cnl repos update <KEY>... [--dry-run]` | Fetch and fast-forward the named checkouts. Each checkout must have a clean working tree and track the expected CIRNETLAB origin. |
+| `cnl repos clone <KEY>... [--dry-run]` · `cnl repos clone --all [--dry-run]` | Clone repositories into missing destinations. With `--all`, verify the origin of existing checkouts and skip them. Requires Git access to the selected repositories. |
+| `cnl repos update <KEY>... [--dry-run]` · `cnl repos update --all [--dry-run]` | Fetch and fast-forward the selected checkouts. Each checkout must have a clean working tree and track the expected CIRNETLAB origin. |
 | `cnl build --all [--offline] [--dry-run]` | Assemble the Windows x64 candidate through Remote and save its receipt for the profile. `--offline` uses cached dependencies. |
 | `cnl build --repo <KEY> [--repo <KEY> ...] [--offline] [--dry-run] [--receipt <RECEIPT>] [--fpga-toolchain <DIR>]` | Build selected components in dependency order. `--all` and `--repo` are mutually exclusive. Interface and Embedded use inputs from an existing candidate. |
-| `cnl run [RUNTIME OPTIONS]` | Start the native stack and serve the packaged Interface. |
-| `cnl dev [RUNTIME OPTIONS]` | Start the native services and serve the working Interface checkout through Vite with hot reload. |
-| `cnl status` | Report the selected profile's runtime status, owned processes, actual ports and Interface URL when running. |
-| `cnl stop [--dry-run]` | Ask the supervisor to stop the application owned by the selected profile. |
+| `cnl run [RUNTIME OPTIONS]` | Start the native stack with Vite in development mode by default. Select `--mode packaged` for the verified packaged Interface. |
+| `cnl dev [RUNTIME OPTIONS]` | Compatibility command for `run --mode development`. |
+| `cnl status` | Report the target, mode, owned services, actual ports and Interface URL for the selected profile. |
+| `cnl stop [--desktop interface] [--dry-run]` | Ask the supervisor to stop the selected profile's owned session. An explicit target must match that session. |
+| `cnl logs [--service native\|vite] [--lines N]` | Read the tail of the current or most recent runtime log in the selected profile. Defaults to 60 lines of `native`. |
+| `cnl shell [powershell\|cmd\|bash\|wsl]` | Open an interactive native shell for the current working directory. Defaults to PowerShell on Windows and Bash on Linux. Windows can also select CMD or WSL. |
+| `cnl completion <powershell\|bash>` | Write a shell completion script to stdout. |
 | `cnl verify [--receipt <RECEIPT>] [--browser-cache <ABSOLUTE_DIR>] [--dry-run]` | Verify the packaged candidate. Uses the profile's installed Chromium if available. Supply a compatible cache explicitly to include browser coverage. |
 | `cnl verify --repo <KEY> [--repo <KEY> ...] [--receipt <RECEIPT>] [--fpga-toolchain <DIR>] [--dry-run]` | Run selected component checks. Interface tests use staged candidate inputs. Embedded runs its RTL checks with a pinned toolchain. |
 
@@ -72,6 +75,7 @@ For Embedded, `CIRNET_FPGA_TOOLCHAIN_ROOT` is the fallback for `--fpga-toolchain
 | Option | Purpose |
 | --- | --- |
 | `--desktop interface`, `--open` | Open the Interface in the default browser after readiness checks. |
+| `--mode development\|packaged` | Select live Vite or the packaged Interface. `dev` accepts development mode only. |
 | `--initialize-db` | Allow the launcher to initialize a fresh SQLite database. Existing databases must pass schema checks. |
 | `--receipt <RECEIPT>` | Start a specific verified candidate. Without it, the CLI uses the last receipt saved by `build --all` for the selected profile. |
 | `--port N` · `--hardware-port N` · `--dev-port N` | Override the HTTP, Hardware RPC and Vite ports for this launch. Profile defaults are `8000`, `50051` and `5173`. Ports must be distinct and in `1024..=65535`. |
@@ -85,11 +89,11 @@ Run the packaged Interface first. Stop that session before using the same profil
 cnl doctor
 cnl setup
 cnl build --all
-cnl run --desktop interface --initialize-db
+cnl run --desktop interface --mode packaged --initialize-db
 cnl status
 cnl stop
 
-cnl dev --desktop interface
+cnl run --desktop interface
 cnl status
 cnl stop
 
@@ -111,3 +115,23 @@ cnl verify --repo cli
 ## Interactive terminal
 
 Use the arrows to navigate, `/` to filter the menu, `:` to enter a command, Tab or Shift+Tab to cycle completions, and `?` to show help. Ctrl+R searches command history. Page Up and Page Down scroll output, Ctrl+F searches it, and F3 advances to the next match. Type `clear` in the TUI to clear the output view. Esc goes back or cancels a cancellable command. Use `cnl stop` for runtime shutdown. Set `NO_COLOR=1` before starting the TUI for monochrome output.
+
+Hover over a suggestion to highlight it. Click to insert it at the cursor and press Enter to run the command. Right-click or press Shift+F10 to open the context menu. Enter `cnl --lang vi` or `cnl --lang en` to switch languages in place. Set `CNL_REDUCED_MOTION=1` to disable the activity spinner.
+
+Enter native commands directly, such as `git status` or `Get-ChildItem | Select-Object -First 5` on Windows. Each prompt command runs in a separate process. Use `cnl shell` when you want working directory or environment changes to persist through multiple native commands. Type `exit` in that shell to return to the TUI.
+
+## Shell completion
+
+PowerShell 7
+
+```powershell
+cnl completion powershell > cnl-completion.ps1
+. ./cnl-completion.ps1
+```
+
+Bash
+
+```bash
+cnl completion bash > cnl-completion.bash
+source ./cnl-completion.bash
+```

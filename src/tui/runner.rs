@@ -11,6 +11,7 @@ use anyhow::{Result, bail};
 use clap::ArgMatches;
 
 use super::viewport::Buffer;
+pub(super) use crate::process::sanitize_console_output as sanitize;
 use crate::{process::hidden, workspace::Workspace};
 
 const STREAM_LIMIT: usize = 128 * 1024;
@@ -24,16 +25,6 @@ pub(super) enum Outcome {
     Pass,
     Fail,
     Cancelled,
-}
-
-impl Outcome {
-    pub(super) fn label(&self) -> &'static str {
-        match self {
-            Self::Pass => "PASS",
-            Self::Fail => "FAIL",
-            Self::Cancelled => "CANCELLED",
-        }
-    }
 }
 
 pub(super) struct RunOutput {
@@ -101,7 +92,13 @@ impl Runner {
             .try_get_matches_from(std::iter::once("cnl").chain(args.iter().map(String::as_str)));
         let action = parsed.as_ref().ok().and_then(ArgMatches::subcommand_name);
         if action == Some("tui") {
-            bail!("The CIRNETLAB terminal is already open.");
+            bail!(
+                "{}",
+                crate::localization::message([
+                    "The CIRNETLAB terminal is already open.",
+                    "Terminal CIRNETLAB đang mở."
+                ])
+            );
         }
         let mut command = Command::new(std::env::current_exe()?);
         let supplied = |name: &str| {
@@ -122,8 +119,17 @@ impl Runner {
         {
             command.arg("--state-dir").arg(path);
         }
+        if !supplied("lang") {
+            command.args(["--lang", if vi { "vi" } else { "en" }]);
+        }
         command.args(args).env("NO_COLOR", "1");
         Self::spawn(command, !matches!(action, Some("run" | "dev" | "stop")), vi)
+    }
+
+    pub(super) fn start_native(line: &str, vi: bool) -> Result<Self> {
+        let command =
+            crate::cli::native::line(line, |input| super::completion::arguments(input).ok())?;
+        Self::spawn(command, true, vi)
     }
 
     fn spawn(mut command: Command, cancellable: bool, vi: bool) -> Result<Self> {
@@ -133,7 +139,7 @@ impl Runner {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped()),
         );
-        let mut child = command.spawn()?;
+        let mut child = command.spawn().map_err(crate::cli::native::unavailable)?;
         let job = if cancellable {
             ProcessJob::attach(&child).ok()
         } else {
@@ -259,71 +265,6 @@ impl Runner {
     }
 }
 
-// A child may emit arbitrary terminal control sequences. Strip them before
-// putting the captured text through the TUI painter.
-pub(super) fn sanitize(bytes: &[u8]) -> String {
-    enum State {
-        Text,
-        Escape,
-        Intermediate,
-        Csi,
-        ControlString { osc: bool, escape: bool },
-    }
-    let control_string = |osc| State::ControlString { osc, escape: false };
-    let chars = bytes.utf8_chunks().flat_map(|chunk| {
-        let invalid = match chunk.invalid() {
-            [] => None,
-            [control @ 0x80..=0x9f] => Some(char::from(*control)),
-            _ => Some('\u{fffd}'),
-        };
-        chunk.valid().chars().chain(invalid)
-    });
-    let mut output = String::with_capacity(bytes.len());
-    let mut state = State::Text;
-    let mut progress = false;
-    for ch in chars {
-        state = match (state, ch) {
-            (State::ControlString { osc, escape }, ch) => {
-                if ch == '\u{9c}' || (escape && ch == '\\') || (osc && ch == '\x07') {
-                    State::Text
-                } else {
-                    State::ControlString {
-                        osc,
-                        escape: ch == '\x1b',
-                    }
-                }
-            }
-            (_, '\x1b') => State::Escape,
-            (State::Escape, '[') | (_, '\u{9b}') => State::Csi,
-            (State::Escape, ']') | (_, '\u{9d}') => control_string(true),
-            (State::Escape, 'P' | 'X' | '^' | '_')
-            | (_, '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}') => control_string(false),
-            (State::Escape | State::Intermediate, '\x20'..='\x2f') => State::Intermediate,
-            (State::Escape | State::Intermediate, _) => State::Text,
-            (State::Csi, '@'..='~') => State::Text,
-            (State::Csi, _) => State::Csi,
-            (State::Text, '\r') => {
-                progress = true;
-                State::Text
-            }
-            (State::Text, ch) => {
-                if matches!(ch, '\n' | '\t') || !ch.is_control() {
-                    if std::mem::take(&mut progress) && ch != '\n' {
-                        output.push('\n');
-                    }
-                    if ch == '\t' {
-                        output.push_str("    ");
-                    } else {
-                        output.push(ch);
-                    }
-                }
-                State::Text
-            }
-        };
-    }
-    output
-}
-
 #[cfg(windows)]
 struct ProcessJob(windows_sys::Win32::Foundation::HANDLE);
 
@@ -366,7 +307,13 @@ struct ProcessJob;
 #[cfg(not(windows))]
 impl ProcessJob {
     fn attach(_: &Child) -> Result<Self> {
-        bail!("Process tree cancellation is available on Windows")
+        bail!(
+            "{}",
+            crate::localization::message([
+                "Process tree cancellation is available on Windows",
+                "Hủy cây tiến trình được hỗ trợ trên Windows"
+            ])
+        )
     }
 }
 

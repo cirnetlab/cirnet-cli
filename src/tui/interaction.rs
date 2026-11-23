@@ -3,7 +3,7 @@ use super::{
     clipboard::{Clipboard, ClipboardError},
     control,
     editor::byte_at_column,
-    terminal::{Frame, InputHit, Line, Tone},
+    terminal::{Frame, InputHit, Line, PalettePart, Tone},
     text,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -163,6 +163,7 @@ enum Press {
     Input(Editor),
     Read,
     Menu(usize),
+    Suggestion(usize),
     Popup(usize),
 }
 
@@ -180,19 +181,21 @@ impl Popup {
             .map(|action| action.label(vi).width())
             .max()
             .unwrap_or(0)
-            + 4)
+            + 5)
         .min(usize::from(size.0.saturating_sub(1))) as u16;
-        let count = self.items.len().min(usize::from(size.1));
+        let count = self.items.len().min(usize::from(size.1.saturating_sub(2)));
         let first = self.selected.saturating_sub(count.saturating_sub(1));
         let left = self.position.0.min(size.0.saturating_sub(width + 1));
-        let top = self.position.1.min(size.1.saturating_sub(count as u16));
+        let top = self.position.1.min(size.1.saturating_sub(count as u16 + 2));
         (left, top, width, first, count)
     }
 
     fn hit(&self, size: (u16, u16), vi: bool, column: u16, row: u16) -> Option<usize> {
         let (left, top, width, first, count) = self.bounds(size, vi);
-        ((left..left + width).contains(&column) && (top..top + count as u16).contains(&row))
-            .then(|| first + usize::from(row - top))
+        (width >= 4
+            && (left + 1..left + width - 1).contains(&column)
+            && (top + 1..top + 1 + count as u16).contains(&row))
+        .then(|| first + usize::from(row - top - 1))
     }
 
     fn step(&mut self, offset: isize) {
@@ -204,30 +207,66 @@ impl Popup {
 
     fn draw(&self, frame: &mut Frame, vi: bool) {
         let (left, top, width, first, count) = self.bounds(frame.size, vi);
-        if width < 4 {
+        if width < 4 || count == 0 {
             return;
         }
         frame.cursor = None;
-        for (index, action) in self.items.iter().enumerate().skip(first).take(count) {
-            let row = usize::from(top) + index - first;
-            let old = frame.rows[row].contents();
-            let mut line = Line::default();
-            let prefix = fit(old, usize::from(left));
-            line.push(Tone::Plain, prefix);
-            line.push(Tone::Plain, " ".repeat(usize::from(left) - prefix.width()));
-            let tone = if index == self.selected {
-                Tone::Selection
-            } else {
-                Tone::Heading
-            };
-            let label = fit(action.label(vi), usize::from(width) - 4);
-            line.push(tone, if index == self.selected { "> " } else { "| " });
-            line.push(tone, label);
-            line.push(tone, " ".repeat(usize::from(width) - 3 - label.width()));
-            line.push(tone, "|");
-            frame.rows[row] = line;
+        let edge = Tone::Palette(PalettePart::ContextEdge);
+        let inner = usize::from(width) - 2;
+        for offset in 0..count + 2 {
+            let row = &mut frame.rows[usize::from(top) + offset];
+            let mut overlay = Line::default();
+            match offset {
+                0 => overlay.push(edge, format!("╭{}╮", "─".repeat(inner))),
+                end if end == count + 1 => {
+                    overlay.push(edge, format!("╰{}╯", "─".repeat(inner)));
+                }
+                _ => {
+                    let index = first + offset - 1;
+                    let selected = index == self.selected;
+                    let tone = if selected {
+                        Tone::Palette(PalettePart::ContextSelected)
+                    } else {
+                        Tone::Palette(PalettePart::ContextItem)
+                    };
+                    let label = fit(self.items[index].label(vi), inner - 2);
+                    overlay.push(edge, "│");
+                    overlay.push(tone, if selected { "› " } else { "  " });
+                    overlay.push(tone, label);
+                    overlay.push(tone, " ".repeat(inner - 2 - label.width()));
+                    overlay.push(edge, "│");
+                }
+            }
+            overlay_line(row, usize::from(left), usize::from(width), &overlay);
         }
     }
+}
+
+fn overlay_line(row: &mut Line, left: usize, width: usize, overlay: &Line) {
+    let right = left + width;
+    let mut column = 0;
+    let mut prefix = Line::default();
+    let mut suffix = Line::default();
+    let mut prefix_width = 0;
+    for (tone, segment) in row.segments() {
+        for symbol in segment.graphemes(true) {
+            let next = column + symbol.width();
+            if next <= left {
+                prefix.push(tone, symbol);
+                prefix_width = next;
+            } else if column >= right {
+                suffix.push(tone, symbol);
+            } else if next > right {
+                suffix.push(Tone::Plain, " ".repeat(next - right));
+            }
+            column = next;
+        }
+    }
+    prefix.push(Tone::Plain, " ".repeat(left - prefix_width));
+    for (tone, segment) in overlay.segments().chain(suffix.segments()) {
+        prefix.push(tone, segment);
+    }
+    *row = prefix;
 }
 
 fn fit(value: &str, width: usize) -> &str {
@@ -716,6 +755,10 @@ impl Menu {
                     self.interaction.press = None;
                     Effect::Idle
                 }
+                MouseEventKind::Moved if hit.is_some_and(|index| index != popup.selected) => {
+                    popup.selected = hit.expect("checked popup hit");
+                    Effect::Redraw
+                }
                 _ => Effect::Idle,
             };
         }
@@ -728,7 +771,11 @@ impl Menu {
             self.interaction.press = None;
             return Effect::Idle;
         };
+        let suggestion = frame.suggestion_hit(column, row);
         match kind {
+            MouseEventKind::Moved if suggestion.is_some() => {
+                self.focus_completion(suggestion.expect("checked suggestion"))
+            }
             MouseEventKind::Down(MouseButton::Right) => {
                 let editor = self.focus_input_at(frame, column, row);
                 if editor.is_none() {
@@ -743,6 +790,15 @@ impl Menu {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.interaction.press = None;
                 self.interaction.selection = None;
+                if let Some(index) = suggestion
+                    && self
+                        .prompt
+                        .as_ref()
+                        .is_some_and(|prompt| !prompt.edited && prompt.error.is_none())
+                {
+                    self.interaction.press = Some(Press::Suggestion(index));
+                    return self.focus_completion(index);
+                }
                 if let Some(editor) = self.focus_input_at(frame, column, row)
                     && let Some(hit) = &frame.input
                 {
@@ -784,6 +840,9 @@ impl Menu {
                 }
             },
             MouseEventKind::Up(MouseButton::Left) => match self.interaction.press.take() {
+                Some(Press::Suggestion(index)) if suggestion == Some(index) => {
+                    self.accept_completion(index)
+                }
                 Some(Press::Menu(index))
                     if frame.menu_hit(column, row) == Some(index) && index < self.items.len() =>
                 {
@@ -830,5 +889,34 @@ impl Menu {
             input.clear_selection();
         }
         Effect::Redraw
+    }
+}
+
+#[cfg(test)]
+mod popup_tests {
+    use super::*;
+
+    #[test]
+    fn popup_clamps_to_terminal_and_never_hits_its_border() {
+        let popup = Popup {
+            items: vec![Action::Copy, Action::Paste],
+            selected: 0,
+            position: (58, 18),
+        };
+        let mut frame = Frame::new((60, 20));
+        let (left, top, width, _, count) = popup.bounds(frame.size, true);
+        assert_eq!(count, 2);
+        assert!(left + width < frame.size.0);
+        assert!(top + 3 < frame.size.1);
+        assert_eq!(popup.hit(frame.size, true, left + 1, top), None);
+        assert_eq!(popup.hit(frame.size, true, left, top + 1), None);
+        assert_eq!(popup.hit(frame.size, true, left + 1, top + 1), Some(0));
+        assert_eq!(popup.hit((2, 2), true, 0, 0), None);
+        popup.draw(&mut frame, true);
+        assert!(
+            frame.rows[usize::from(top + 1)]
+                .contents()
+                .contains("Sao chép")
+        );
     }
 }

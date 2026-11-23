@@ -18,7 +18,7 @@ if ($LASTEXITCODE -ne 0 -or !$cnl) { throw 'Bản dựng cnl chưa hoàn tất.'
 & $cnl doctor
 & $cnl setup
 & $cnl build --all
-& $cnl run --desktop interface --initialize-db
+& $cnl run --desktop interface --mode packaged --initialize-db
 & $cnl status
 & $cnl stop
 ```
@@ -35,7 +35,7 @@ Chạy `cnl` hoặc `cnl tui` trong terminal. Dùng `--lang vi` để chọn ti�
 
 Khi chọn một mục trong menu, terminal mở ô nhập mới với lệnh cơ bản. Các thao tác đề xuất nằm trong danh sách gợi ý. Nhập `cnl --lang vi` hoặc `cnl tui --lang vi` để chuyển TUI đang mở sang tiếng Việt. Dùng `en` để trở về tiếng Anh. Terminal chuyển thể [menu CNR](https://github.com/cirnetlab/cirnet-rules/tree/646afa38516bbfd276b0aecb7a138ab427df5fa9/src/cli/menu) theo giấy phép GPL-3.0.
 
-Dùng `cnl dev --desktop interface --initialize-db` để phục vụ mã Interface đang làm việc qua Vite, với proxy API và WebSocket hiện có. Chọn cổng phát triển khác khi cổng mặc định đang được dùng. CLI kiểm tra HTTP, trang Interface và tuyến WebSocket có xác thực trước khi mở trình duyệt. Launcher native cho phép origin loopback của Vite theo cổng đã chọn. Khi đổi ứng viên, CLI lưu cache đã kiểm chứng trước đó trong thư mục `.runtime/` do Git bỏ qua. Cần kiểm tra các nội dung cache không nhận diện được.
+Dùng `cnl run --desktop interface --initialize-db` để phục vụ mã Interface đang làm việc qua Vite, với proxy API và WebSocket hiện có. Chọn cổng phát triển khác khi cổng mặc định đang được dùng. CLI kiểm tra HTTP, trang Interface và tuyến WebSocket có xác thực trước khi mở trình duyệt. Launcher native cho phép origin loopback của Vite theo cổng đã chọn. Khi đổi ứng viên, CLI lưu cache đã kiểm chứng trước đó trong thư mục `.runtime/` do Git bỏ qua. Cần kiểm tra các nội dung cache không nhận diện được.
 
 Chạy `cnl setup --browser` để cài Chromium tương ứng với ứng viên đã chọn. Chạy `cnl verify` để kiểm tra bản cài, API, lưu trữ, Stop an toàn và trình duyệt. Dùng `--browser-cache <đường-dẫn>` để dùng lại Chromium phù hợp đã cài. Kết quả báo rõ phạm vi kiểm tra khi thiếu cache trình duyệt. `cnl run`, `cnl dev` và `cnl verify` nhận `--receipt <đường-dẫn-assembly-result.json>` để chọn ứng viên đã build.
 

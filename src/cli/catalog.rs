@@ -1,8 +1,4 @@
-pub(crate) type Localized = [&'static str; 2];
-
-pub(crate) fn text(value: Localized, vi: bool) -> &'static str {
-    value[usize::from(vi)]
-}
+pub(crate) use crate::localization::{Localized, text};
 
 pub(crate) struct Entry {
     pub label: Localized,
@@ -58,21 +54,12 @@ pub(crate) const ENTRIES: &[Entry] = &[
         recommendation: Some("--all"),
     },
     Entry {
-        label: ["Run Interface", "Chạy Interface"],
+        label: ["Run Program", "Chạy chương trình"],
         detail: [
-            "Start the native stack and open the packaged Interface after readiness.",
-            "Khởi động hệ thống native và mở Interface đóng gói khi sẵn sàng.",
+            "Start Interface in development mode or choose the packaged build.",
+            "Chạy Interface ở chế độ phát triển hoặc chọn bản đóng gói.",
         ],
         command: "run",
-        recommendation: Some("--desktop interface"),
-    },
-    Entry {
-        label: ["Develop Interface", "Phát triển Interface"],
-        detail: [
-            "Start native services and serve live Interface sources with Vite.",
-            "Khởi động dịch vụ native và phục vụ mã Interface qua Vite.",
-        ],
-        command: "dev",
         recommendation: Some("--desktop interface"),
     },
     Entry {
@@ -103,6 +90,33 @@ pub(crate) const ENTRIES: &[Entry] = &[
         recommendation: None,
     },
     Entry {
+        label: ["Runtime logs", "Nhật ký runtime"],
+        detail: [
+            "Read the current or latest owned service log.",
+            "Đọc nhật ký gần nhất của dịch vụ do CLI quản lý.",
+        ],
+        command: "logs",
+        recommendation: None,
+    },
+    Entry {
+        label: ["Native shell", "Shell native"],
+        detail: [
+            "Open a native shell in the current terminal.",
+            "Mở shell native trong terminal hiện tại.",
+        ],
+        command: "shell",
+        recommendation: None,
+    },
+    Entry {
+        label: ["Shell completion", "Gợi ý lệnh trên shell"],
+        detail: [
+            "Generate a shell completion script.",
+            "Tạo script gợi ý lệnh cho shell.",
+        ],
+        command: "completion",
+        recommendation: None,
+    },
+    Entry {
         label: ["Command reference", "Tham chiếu lệnh"],
         detail: [
             "Show command syntax and available options.",
@@ -126,4 +140,96 @@ pub(crate) fn detail(words: &str, vi: bool) -> Option<&'static str> {
             entry.command == words || entry.command.split_whitespace().next() == Some(words)
         })
         .map(|entry| text(entry.detail, vi))
+}
+
+pub(crate) fn localize(command: clap::Command, vi: bool) -> clap::Command {
+    localize_command(command, "", vi)
+}
+
+fn localize_command(mut command: clap::Command, parent: &str, vi: bool) -> clap::Command {
+    let name = command.get_name();
+    let description = match (parent, name) {
+        ("repos", "status") => Some([
+            "Inspect repository branches, revisions and working trees",
+            "Kiểm tra nhánh, revision và cây làm việc của các repo",
+        ]),
+        (_, name) => match name {
+            "cnl" => Some(["CIRNETLAB developer tools", "Công cụ phát triển CIRNETLAB"]),
+            "tui" => Some(["Open the CIRNET LAB terminal", "Mở terminal CIRNET LAB"]),
+            "dev" => Some([
+                "Start Interface in development mode (legacy)",
+                "Chạy Interface ở chế độ phát triển (lệnh tương thích)",
+            ]),
+            "show" => Some(["Show the current profile", "Hiển thị hồ sơ hiện tại"]),
+            "check" => Some([
+                "Check profile and toolchain prerequisites",
+                "Kiểm tra hồ sơ và điều kiện toolchain",
+            ]),
+            "set" => Some([
+                "Update local profile ports",
+                "Cập nhật cổng của hồ sơ cục bộ",
+            ]),
+            "discover" => Some([
+                "List expected repository locations",
+                "Liệt kê vị trí repo dự kiến",
+            ]),
+            "clone" => Some([
+                "Clone selected missing checkouts",
+                "Clone các checkout còn thiếu đã chọn",
+            ]),
+            "update" => Some([
+                "Fast-forward selected clean checkouts",
+                "Cập nhật fast-forward các checkout sạch đã chọn",
+            ]),
+            _ => None,
+        },
+    }
+    .map(|value| text(value, vi))
+    .or_else(|| detail(name, vi));
+    if let Some(description) = description {
+        command = command.about(description);
+    }
+    let parent = command.get_name().to_owned();
+    if vi {
+        command = command
+            .disable_help_flag(true)
+            .arg(
+                clap::Arg::new("help")
+                    .short('h')
+                    .long("help")
+                    .action(clap::ArgAction::Help),
+            )
+            .subcommand_help_heading("Các lệnh")
+            .help_template(
+                "{before-help}{about-with-newline}\nCách dùng: {usage}\n\n{all-args}{after-help}",
+            );
+        if parent == "cnl" {
+            command = command.disable_version_flag(true).arg(
+                clap::Arg::new("version")
+                    .short('V')
+                    .long("version")
+                    .action(clap::ArgAction::Version),
+            );
+        }
+    }
+    command
+        .mut_args(
+            |arg| match crate::localization::option(arg.get_id().as_str()) {
+                Some(label) if vi || arg.get_help().is_none() => {
+                    if vi {
+                        let heading = if arg.get_long().is_some() {
+                            "Tùy chọn"
+                        } else {
+                            "Đối số"
+                        };
+                        arg.help(text(label, vi)).help_heading(heading)
+                    } else {
+                        arg.help(text(label, vi))
+                    }
+                }
+                None => arg,
+                Some(_) => arg,
+            },
+        )
+        .mut_subcommands(|child| localize_command(child, &parent, vi))
 }

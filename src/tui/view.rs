@@ -8,7 +8,7 @@ use std::{borrow::Cow, ops::Range, sync::LazyLock};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const NAME: &str = "CIRNETLAB";
+const NAME: &str = "CIRNET LAB";
 const MAX_COLUMNS: usize = 132;
 
 fn clip(value: &str, width: usize) -> Cow<'_, str> {
@@ -270,6 +270,26 @@ impl<'a> Palette<'a> {
         1 + self.choices + 2 * u16::from(self.bordered)
     }
 
+    fn choice_start(&self) -> usize {
+        self.prompt
+            .accepted
+            .as_ref()
+            .map_or(0, |(index, _)| *index)
+            .saturating_add(1)
+            .saturating_sub(usize::from(self.choices))
+    }
+
+    fn attach_choices(&self, frame: &mut Frame, row: u16, margin: usize) {
+        if self.choices != 0 && self.prompt.error.is_none() {
+            let first_row = row + if self.bordered { 3 } else { 1 };
+            frame.suggestions = Some(MenuRows {
+                columns: margin as u16..(margin + self.width) as u16,
+                rows: first_row..first_row + self.choices,
+                first: self.choice_start(),
+            });
+        }
+    }
+
     fn draw_cap(&self, line: &mut Line, top: bool, color: bool) {
         static RULE: LazyLock<String> = LazyLock::new(|| "─".repeat(MAX_COLUMNS));
 
@@ -369,9 +389,9 @@ impl<'a> Palette<'a> {
         } else {
             Tone::Muted
         };
-        let focus = self.prompt.accepted.as_ref().map_or(0, |(index, _)| *index);
+        let focus = self.prompt.focus;
         let offset = row - if self.bordered { 3 } else { 1 };
-        let index = (focus + 1).saturating_sub(usize::from(self.choices)) + usize::from(offset);
+        let index = self.choice_start() + usize::from(offset);
         let item = &self.prompt.completions[index];
         let selected = index == focus;
         line.push(
@@ -452,7 +472,13 @@ fn output_frame(menu: &mut Menu, size: (u16, u16), color: bool) -> Frame {
             margin,
             width,
             Tone::Accent,
-            &format!("{NAME}  /  {}", output.title),
+            &format!(
+                "{NAME}  /  {}",
+                output
+                    .title
+                    .as_deref()
+                    .unwrap_or_else(|| text(["Native shell", "Shell native"], menu.vi)),
+            ),
         );
     }
     output.layout(width, usize::from(visible));
@@ -466,9 +492,17 @@ fn output_frame(menu: &mut Menu, size: (u16, u16), color: bool) -> Frame {
         }
     }
     if let Some(row) = status_row {
-        label(&mut frame, row, margin, width, output.tone, &output.status);
+        label(
+            &mut frame,
+            row,
+            margin,
+            width,
+            output.tone,
+            &output.status_line(),
+        );
     }
     if let Some(palette) = palette {
+        palette.attach_choices(&mut frame, command_row, margin);
         for offset in 0..palette.rows() {
             let row = command_row + offset;
             let mut line = indented(margin);
@@ -602,6 +636,7 @@ fn menu_frame(menu: &mut Menu, size: (u16, u16), banner: bool, color: bool) -> F
             let menu_rows = (available - 1).min(2);
             let palette = Palette::new(prompt, width, available - menu_rows, true, true);
             end -= palette.rows();
+            palette.attach_choices(&mut frame, end, margin);
             for offset in 0..palette.rows() {
                 let y = end + offset;
                 let mut line = indented(margin);
@@ -624,6 +659,9 @@ fn menu_frame(menu: &mut Menu, size: (u16, u16), banner: bool, color: bool) -> F
             Palette::new(prompt, right_width, end - row - start, true, true),
         )
     });
+    if let Some((start, palette)) = &wide_palette {
+        palette.attach_choices(&mut frame, row + start, margin + left_width + 5);
+    }
     let items = &menu.items[menu.first..];
     frame.menu = Some(MenuRows {
         columns: margin as u16..(margin + left_width) as u16,

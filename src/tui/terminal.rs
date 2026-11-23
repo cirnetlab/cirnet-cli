@@ -22,9 +22,9 @@ const ORANGE: Color = Color::Rgb {
 };
 
 const SHADOW: Color = Color::Rgb {
-    r: 81,
+    r: 97,
     g: 57,
-    b: 50,
+    b: 39,
 };
 
 const SHADOW_SOFT: Color = Color::Rgb {
@@ -35,24 +35,24 @@ const SHADOW_SOFT: Color = Color::Rgb {
 
 const BANNER_COLORS: [Color; 4] = [
     Color::Rgb {
-        r: 225,
-        g: 158,
-        b: 119,
+        r: 255,
+        g: 214,
+        b: 168,
     },
     Color::Rgb {
-        r: 219,
-        g: 145,
-        b: 110,
+        r: 246,
+        g: 189,
+        b: 142,
     },
     Color::Rgb {
-        r: 211,
-        g: 133,
-        b: 103,
+        r: 235,
+        g: 164,
+        b: 114,
     },
     Color::Rgb {
-        r: 200,
-        g: 119,
-        b: 101,
+        r: 209,
+        g: 131,
+        b: 88,
     },
 ];
 
@@ -94,6 +94,9 @@ pub(super) enum PalettePart {
     Detail,
     Suggestion,
     Selected,
+    ContextEdge,
+    ContextItem,
+    ContextSelected,
 }
 
 pub(super) fn color_enabled() -> bool {
@@ -221,11 +224,17 @@ impl Style {
             Detail => (depth.color((159, 161, 166), 248, Grey), Some(suggestions)),
             Suggestion => (depth.color((211, 212, 215), 252, White), Some(suggestions)),
             Selected => (depth.color((237, 237, 239), 255, White), Some(suggestions)),
+            ContextEdge => (depth.color((100, 108, 118), 242, Grey), None),
+            ContextItem => (depth.color((232, 233, 236), 254, White), Some(suggestions)),
+            ContextSelected => (
+                depth.color((248, 249, 251), 255, White),
+                Some(depth.color((55, 70, 86), 238, DarkBlue)),
+            ),
         };
         Self {
             color: Some(color),
             background,
-            attribute: (part == Selected).then_some(Attribute::Bold),
+            attribute: matches!(part, Selected | ContextSelected).then_some(Attribute::Bold),
         }
     }
 
@@ -302,7 +311,7 @@ impl Line {
         *self = selected;
     }
 
-    fn segments(&self) -> impl DoubleEndedIterator<Item = (Tone, &str)> {
+    pub(super) fn segments(&self) -> impl DoubleEndedIterator<Item = (Tone, &str)> {
         self.0.iter().flat_map(|data| {
             data.ends.iter().enumerate().map(|(index, &(tone, end))| {
                 let start = index.checked_sub(1).map_or(0, |i| data.ends[i].1);
@@ -425,6 +434,7 @@ pub(super) struct Frame {
     pub(super) rows: Vec<Line>,
     pub(super) cursor: Option<(u16, u16)>,
     pub(super) menu: Option<MenuRows>,
+    pub(super) suggestions: Option<MenuRows>,
     pub(super) input: Option<InputHit>,
     pub(super) readable: Option<Range<u16>>,
 }
@@ -443,6 +453,7 @@ impl Frame {
             cursor: None,
             rows: vec![Line::default(); usize::from(size.1)],
             menu: None,
+            suggestions: None,
             input: None,
             readable: None,
         }
@@ -452,6 +463,12 @@ impl Frame {
         let menu = self.menu.as_ref()?;
         (menu.columns.contains(&x) && menu.rows.contains(&y))
             .then(|| menu.first + usize::from(y - menu.rows.start))
+    }
+
+    pub(super) fn suggestion_hit(&self, x: u16, y: u16) -> Option<usize> {
+        let choices = self.suggestions.as_ref()?;
+        (choices.columns.contains(&x) && choices.rows.contains(&y))
+            .then(|| choices.first + usize::from(y - choices.rows.start))
     }
 
     pub(super) fn changed_rows<'a>(

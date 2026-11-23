@@ -22,7 +22,7 @@ fn build_scope_is_explicit_and_orders_dependencies() {
 }
 
 #[test]
-fn git_mutations_require_named_repositories() {
+fn git_mutations_require_one_explicit_scope() {
     for operation in ["clone", "update"] {
         assert!(
             cli::app()
@@ -31,10 +31,114 @@ fn git_mutations_require_named_repositories() {
         );
         assert!(
             cli::app()
-                .try_get_matches_from(["cnl", "repos", operation, "hardware", "--dry-run"])
+                .try_get_matches_from([
+                    "cnl",
+                    "repos",
+                    operation,
+                    "hardware",
+                    "remote",
+                    "--dry-run"
+                ])
                 .is_ok()
         );
+        assert!(
+            cli::app()
+                .try_get_matches_from(["cnl", "repos", operation, "--all", "--dry-run"])
+                .is_ok()
+        );
+        assert!(
+            cli::app()
+                .try_get_matches_from(["cnl", "repos", operation, "remote", "--all"])
+                .is_err()
+        );
     }
+}
+
+#[test]
+fn binary_resolves_runtime_targets_and_modes_without_starting_services() {
+    let workspace = std::env::temp_dir();
+    let state = workspace.join(format!("cnl-dry-run-fixture-{}", std::process::id()));
+    let run = |args: &[&str]| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_cnl"))
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("--state-dir")
+            .arg(&state)
+            .args(["--json"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    for (args, mode, open) in [
+        (&["run"][..], "development", false),
+        (&["run", "--desktop", "interface"][..], "development", true),
+        (
+            &["run", "--desktop", "interface", "--mode", "packaged"][..],
+            "packaged",
+            true,
+        ),
+        (&["dev", "--mode", "development"][..], "development", false),
+    ] {
+        let args = args
+            .iter()
+            .copied()
+            .chain(["--dry-run"])
+            .collect::<Vec<_>>();
+        let report = run(&args);
+        assert_eq!(report["mode"], mode);
+        assert_eq!(report["target"], "interface");
+        assert_eq!(report["openBrowser"], open);
+    }
+    let preview = run(&["stop", "--desktop", "interface", "--dry-run"]);
+    assert_eq!(preview["target"], "interface");
+    assert_eq!(preview["ownedInstance"], false);
+    assert!(!state.exists());
+    assert!(
+        cli::app()
+            .try_get_matches_from(["cnl", "dev", "--mode", "packaged"])
+            .is_err()
+    );
+}
+
+#[test]
+fn binary_help_localizes_options_and_hides_compatibility_commands() {
+    let cnl = env!("CARGO_BIN_EXE_cnl");
+    let help = |args: &[&str]| {
+        let output = std::process::Command::new(cnl).args(args).output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let root = help(&["--help"]);
+    assert!(root.contains("completion"));
+    assert!(
+        !root
+            .lines()
+            .any(|line| line.trim_start().starts_with("dev "))
+    );
+    let vi = help(&["run", "--lang", "vi", "--help"]);
+    assert!(vi.contains("Cách dùng"));
+    assert!(vi.contains("Chọn chế độ chạy Interface"));
+    assert!(vi.contains("Chọn hồ sơ runtime"));
+    assert!(vi.contains("Hiển thị trợ giúp"));
+    assert!(help(&["--lang=en", "run", "--help"]).contains("Choose the Interface runtime mode"));
+}
+
+#[test]
+fn binary_localizes_application_diagnostics_without_requiring_a_profile() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cnl"))
+        .arg("--workspace")
+        .arg(std::env::temp_dir())
+        .args(["--state-dir", "relative-state", "--lang", "vi", "status"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("đường dẫn tuyệt đối"));
 }
 
 #[test]

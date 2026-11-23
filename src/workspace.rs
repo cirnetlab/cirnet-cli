@@ -7,7 +7,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::process::{capture, isolate_git, run};
+use crate::{
+    localization::message,
+    process::{capture, isolate_git, run},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Repo {
@@ -98,9 +101,13 @@ pub struct Workspace {
 }
 
 pub fn canonical(path: &Path) -> Result<PathBuf> {
-    let absolute = path
-        .canonicalize()
-        .with_context(|| format!("Cannot resolve {}", path.display()))?;
+    let absolute = path.canonicalize().with_context(|| {
+        format!(
+            "{} {}",
+            message(["Cannot resolve", "Không thể phân giải"]),
+            path.display()
+        )
+    })?;
     let Some(text) = absolute.to_str() else {
         return Ok(absolute);
     };
@@ -139,7 +146,11 @@ impl Workspace {
             }
         }
         bail!(
-            "Could not find the CIRNETLAB workspace. Set --workspace <directory> or CNL_WORKSPACE."
+            "{}",
+            message([
+                "Could not find the CIRNETLAB workspace. Set --workspace <directory> or CNL_WORKSPACE.",
+                "Không tìm thấy workspace CIRNETLAB. Đặt --workspace <thư-mục> hoặc CNL_WORKSPACE."
+            ])
         )
     }
 
@@ -149,14 +160,30 @@ impl Workspace {
 
     pub fn require(&self, repo: Repo) -> Result<PathBuf> {
         let path = self.path(repo);
-        let metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("Checkout missing: {}", path.display()))?;
+        let metadata = fs::symlink_metadata(&path).with_context(|| {
+            format!(
+                "{} {}",
+                message(["Checkout missing:", "Thiếu checkout tại"]),
+                path.display()
+            )
+        })?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            bail!("Expected a real checkout: {}", path.display());
+            bail!(
+                "{} {}",
+                message(["Expected a real checkout:", "Cần checkout Git thực tại"]),
+                path.display()
+            );
         }
         let root = capture(git(&path).args(["rev-parse", "--show-toplevel"]))?;
         if canonical(Path::new(&root))? != canonical(&path)? {
-            bail!("{} is not an independent Git checkout", path.display());
+            bail!(
+                "{} {}",
+                path.display(),
+                message([
+                    "is not an independent Git checkout",
+                    "không phải checkout Git độc lập"
+                ])
+            );
         }
         Ok(path)
     }
@@ -197,44 +224,56 @@ impl Workspace {
             let path = self.path(repo);
             if action == "clone" {
                 if fs::symlink_metadata(&path).is_ok() {
-                    bail!("Clone destination already exists: {}", path.display());
+                    bail!(
+                        "{} {}",
+                        message([
+                            "Clone destination already exists:",
+                            "Đường dẫn clone đã tồn tại"
+                        ]),
+                        path.display()
+                    );
                 }
                 continue;
             }
             let path = self.require(repo)?;
             if !capture(git(&path).args(["status", "--porcelain=v1"]))?.is_empty() {
                 bail!(
-                    "{} has local changes. Commit or stash them before updating.",
-                    repo.name()
+                    "{} {}",
+                    repo.name(),
+                    message([
+                        "has local changes. Commit or stash them before updating.",
+                        "có thay đổi cục bộ. Hãy commit hoặc stash trước khi cập nhật."
+                    ])
                 );
             }
             let branch = capture(git(&path).args(["branch", "--show-current"]))?;
             let mut key = format!("branch.{branch}.remote");
             if branch.is_empty() || capture(git(&path).args(["config", "--get", &key]))? != "origin"
             {
-                bail!("{} must be on a branch tracking origin", repo.name());
-            }
-            let url = capture(git(&path).args(["remote", "get-url", "origin"]))?;
-            if url.trim_end_matches(".git") != repo.url().trim_end_matches(".git")
-                && url.trim_end_matches(".git")
-                    != format!("git@github.com:cirnetlab/{}", repo.name())
-            {
                 bail!(
-                    "{} origin is not the expected CIRNETLAB repository",
-                    repo.name()
+                    "{} {}",
+                    repo.name(),
+                    message([
+                        "must be on a branch tracking origin",
+                        "phải ở nhánh theo dõi origin"
+                    ])
                 );
             }
+            self.verify_origin(repo, &path)?;
             key = format!("branch.{branch}.merge");
             if !capture(git(&path).args(["config", "--get", &key]))?.starts_with("refs/heads/") {
-                bail!("{} has no branch upstream", repo.name());
+                bail!(
+                    "{} {}",
+                    repo.name(),
+                    message(["has no branch upstream", "chưa có nhánh upstream"])
+                );
             }
         }
         let mut report = Vec::new();
         for &repo in selected {
             if !dry {
                 if action == "clone" {
-                    run(Command::new("git")
-                        .current_dir(&self.root)
+                    run(git(&self.root)
                         .arg("clone")
                         .arg("--")
                         .arg(repo.url())
@@ -252,6 +291,35 @@ impl Workspace {
             report.push(json!({"repo": repo.name(), "operation": action, "dryRun": dry}));
         }
         Ok(report)
+    }
+
+    pub fn missing_checkouts(&self) -> Result<Vec<Repo>> {
+        let mut missing = Vec::new();
+        for repo in Repo::ALL {
+            match fs::symlink_metadata(self.path(repo)) {
+                Ok(_) => self.verify_origin(repo, &self.require(repo)?)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => missing.push(repo),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(missing)
+    }
+
+    fn verify_origin(&self, repo: Repo, path: &Path) -> Result<()> {
+        let url = capture(git(path).args(["remote", "get-url", "origin"]))?;
+        if url.trim_end_matches(".git") != repo.url().trim_end_matches(".git")
+            && url.trim_end_matches(".git") != format!("git@github.com:cirnetlab/{}", repo.name())
+        {
+            bail!(
+                "{} {}",
+                repo.name(),
+                message([
+                    "origin is not the expected CIRNETLAB repository",
+                    "có origin khác repo CIRNETLAB đã định"
+                ])
+            );
+        }
+        Ok(())
     }
 }
 

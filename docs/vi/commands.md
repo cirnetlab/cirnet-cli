@@ -34,7 +34,7 @@ Các ví dụ bên dưới dùng `cnl`. Nếu CLI chưa có trong PATH, dùng `&
 | `--state-dir <ABSOLUTE_DIR>` | Chọn thư mục tuyệt đối bên ngoài Git checkout để lưu hồ sơ, cơ sở dữ liệu SQLite cục bộ và bản dựng. Mặc định mỗi workspace có thư mục riêng dưới `%LOCALAPPDATA%\CIRNETLAB`. |
 | `--profile <NAME>` | Chọn hồ sơ. Mặc định là `windows-x64`. Tên có thể chứa chữ, số, dấu gạch ngang hoặc gạch dưới. Dùng cùng workspace, thư mục trạng thái và hồ sơ trong suốt một vòng chạy. |
 | `--json` | Ghi báo cáo có cấu trúc ra stdout. Chế độ này ẩn tiến độ trên stdout của tiến trình con. Thông báo chẩn đoán vẫn đi qua stderr. |
-| `--lang en\|vi` | Chọn ngôn ngữ terminal tương tác. Mặc định là `en`. |
+| `--lang en\|vi` | Chọn ngôn ngữ CLI và terminal tương tác. Mặc định là `en`. |
 | `-h`, `--help` | Hiện trợ giúp cho lệnh đã chọn. |
 | `-V`, `--version` | Xem phiên bản CLI ở cấp lệnh chính. |
 
@@ -54,14 +54,17 @@ Các ví dụ bên dưới dùng `cnl`. Nếu CLI chưa có trong PATH, dùng `&
 | `cnl setup --browser [--receipt <RECEIPT>] [--dry-run]` | Cài Chromium tương ứng với ứng viên đã chọn vào hồ sơ. |
 | `cnl repos discover` | Liệt kê đường dẫn checkout dự kiến và trạng thái hiện diện. |
 | `cnl repos status` | Xem nhánh, commit, thay đổi cục bộ, remote và trạng thái phụ thuộc. |
-| `cnl repos clone <KEY>... [--dry-run]` | Clone các repo đã chỉ định vào những đường dẫn còn thiếu. Tài khoản Git cần quyền đọc các repo đó. |
-| `cnl repos update <KEY>... [--dry-run]` | Fetch và cập nhật fast-forward các checkout đã chỉ định. Checkout phải sạch và theo dõi đúng origin CIRNETLAB. |
+| `cnl repos clone <KEY>... [--dry-run]` · `cnl repos clone --all [--dry-run]` | Clone repo vào những đường dẫn còn thiếu. Với `--all`, kiểm tra origin của checkout đã có rồi bỏ qua các checkout đó. Tài khoản Git cần quyền đọc các repo đã chọn. |
+| `cnl repos update <KEY>... [--dry-run]` · `cnl repos update --all [--dry-run]` | Fetch và cập nhật fast-forward các checkout đã chọn. Checkout phải sạch và theo dõi đúng origin CIRNETLAB. |
 | `cnl build --all [--offline] [--dry-run]` | Dựng ứng viên Windows x64 qua Remote và lưu receipt cho hồ sơ. Cờ `--offline` dùng phụ thuộc từ cache. |
 | `cnl build --repo <KEY> [--repo <KEY> ...] [--offline] [--dry-run] [--receipt <RECEIPT>] [--fpga-toolchain <DIR>]` | Build các thành phần đã chọn theo thứ tự phụ thuộc. Chọn một trong hai cờ `--all` và `--repo`. Interface và Embedded dùng đầu vào từ ứng viên đã có. |
-| `cnl run [RUNTIME OPTIONS]` | Khởi động hệ thống native và phục vụ Interface đã đóng gói. |
-| `cnl dev [RUNTIME OPTIONS]` | Khởi động các dịch vụ native và phục vụ checkout Interface hiện tại qua Vite có hot reload. |
-| `cnl status` | Xem trạng thái hồ sơ, tiến trình do CLI quản lý, cổng thực tế và URL Interface khi đang chạy. |
-| `cnl stop [--dry-run]` | Yêu cầu supervisor dừng ứng dụng do hồ sơ đang chọn quản lý. |
+| `cnl run [RUNTIME OPTIONS]` | Khởi động hệ thống native với Vite ở chế độ phát triển theo mặc định. Dùng `--mode packaged` để chạy Interface đóng gói đã kiểm chứng. |
+| `cnl dev [RUNTIME OPTIONS]` | Lệnh tương thích cho `run --mode development`. |
+| `cnl status` | Xem đích, chế độ, dịch vụ do CLI quản lý, cổng thực tế và URL Interface của hồ sơ đã chọn. |
+| `cnl stop [--desktop interface] [--dry-run]` | Yêu cầu supervisor dừng phiên do hồ sơ đã chọn quản lý. Đích được chỉ định phải khớp với phiên đó. |
+| `cnl logs [--service native\|vite] [--lines N]` | Đọc phần cuối nhật ký runtime đang chạy hoặc gần nhất trong hồ sơ đã chọn. Mặc định đọc 60 dòng của `native`. |
+| `cnl shell [powershell\|cmd\|bash\|wsl]` | Mở shell native tương tác tại thư mục hiện tại. Mặc định dùng PowerShell trên Windows và Bash trên Linux. Trên Windows có thể chọn CMD hoặc WSL. |
+| `cnl completion <powershell\|bash>` | Xuất script gợi ý lệnh cho shell qua stdout. |
 | `cnl verify [--receipt <RECEIPT>] [--browser-cache <ABSOLUTE_DIR>] [--dry-run]` | Kiểm chứng ứng viên đóng gói. Lệnh dùng Chromium đã cài trong hồ sơ nếu có. Chỉ định cache tương thích để chạy cả phần kiểm thử trình duyệt. |
 | `cnl verify --repo <KEY> [--repo <KEY> ...] [--receipt <RECEIPT>] [--fpga-toolchain <DIR>] [--dry-run]` | Kiểm tra các thành phần đã chọn. Interface dùng đầu vào từ ứng viên. Embedded chạy kiểm thử RTL với bộ công cụ đã ghim. |
 
@@ -72,6 +75,7 @@ Với Embedded, biến `CIRNET_FPGA_TOOLCHAIN_ROOT` cung cấp đường dẫn k
 | Tùy chọn | Công dụng |
 | --- | --- |
 | `--desktop interface`, `--open` | Mở Interface trong trình duyệt mặc định khi kiểm tra sẵn sàng thành công. |
+| `--mode development\|packaged` | Chọn Vite hoặc Interface đóng gói. Lệnh `dev` chỉ nhận chế độ phát triển. |
 | `--initialize-db` | Cho phép launcher khởi tạo cơ sở dữ liệu SQLite mới. Cơ sở dữ liệu đã có phải qua kiểm tra schema. |
 | `--receipt <RECEIPT>` | Chọn ứng viên đã kiểm chứng để chạy. Nếu bỏ qua, CLI dùng receipt cuối cùng mà `build --all` đã lưu cho hồ sơ. |
 | `--port N` · `--hardware-port N` · `--dev-port N` | Đổi cổng HTTP, Hardware RPC và Vite cho lần chạy này. Giá trị mặc định là `8000`, `50051` và `5173`. Các cổng phải khác nhau và nằm trong `1024..=65535`. |
@@ -85,11 +89,11 @@ Chạy Interface đóng gói trước. Dừng phiên đó trước khi chạy Vi
 cnl doctor
 cnl setup
 cnl build --all
-cnl run --desktop interface --initialize-db
+cnl run --desktop interface --mode packaged --initialize-db
 cnl status
 cnl stop
 
-cnl dev --desktop interface
+cnl run --desktop interface
 cnl status
 cnl stop
 
@@ -111,3 +115,23 @@ cnl verify --repo cli
 ## Terminal tương tác
 
 Dùng phím mũi tên để điều hướng, `/` để lọc menu, `:` để nhập lệnh, Tab hoặc Shift+Tab để duyệt gợi ý và `?` để xem trợ giúp. Ctrl+R tìm trong lịch sử lệnh. Page Up và Page Down cuộn đầu ra, Ctrl+F tìm nội dung, F3 chuyển đến kết quả tiếp theo. Nhập `clear` trong TUI để xóa phần kết quả đang hiển thị. Esc quay lại hoặc hủy lệnh hỗ trợ hủy. Dùng `cnl stop` để dừng ứng dụng. Đặt `NO_COLOR=1` trước khi mở TUI để tắt màu.
+
+Rê chuột lên mục gợi ý để tô sáng. Bấm để chèn mục vào vị trí nhập và nhấn Enter để chạy lệnh. Nhấp chuột phải hoặc nhấn Shift+F10 để mở menu ngữ cảnh. Nhập `cnl --lang vi` hoặc `cnl --lang en` để đổi ngôn ngữ ngay trong TUI. Đặt `CNL_REDUCED_MOTION=1` để tắt hiệu ứng chờ.
+
+Nhập lệnh native trực tiếp, ví dụ `git status` hoặc `Get-ChildItem | Select-Object -First 5` trên Windows. Mỗi lệnh chạy trong tiến trình riêng. Dùng `cnl shell` nếu cần giữ thay đổi thư mục làm việc hoặc biến môi trường qua nhiều lệnh native. Nhập `exit` trong shell để trở lại TUI.
+
+## Gợi ý lệnh trên shell
+
+PowerShell 7
+
+```powershell
+cnl completion powershell > cnl-completion.ps1
+. ./cnl-completion.ps1
+```
+
+Bash
+
+```bash
+cnl completion bash > cnl-completion.bash
+source ./cnl-completion.bash
+```

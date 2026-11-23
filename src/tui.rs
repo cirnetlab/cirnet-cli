@@ -1,6 +1,6 @@
 mod banner;
 mod clipboard;
-mod completion;
+pub(crate) mod completion;
 mod editor;
 mod highlight;
 mod interaction;
@@ -32,6 +32,7 @@ use std::{
 };
 
 use crate::cli::catalog::{ENTRIES, Entry, Localized, text};
+use crate::localization;
 
 const COMMAND_LIMIT: usize = 8192;
 const SEARCH_LIMIT: usize = 256;
@@ -66,6 +67,7 @@ struct Prompt {
     completions: Vec<Suggestion>,
     edited: bool,
     accepted: Option<(usize, Input)>,
+    focus: usize,
 }
 
 impl Prompt {
@@ -73,11 +75,12 @@ impl Prompt {
         self.error = None;
         self.edited = true;
         self.accepted = None;
+        self.focus = 0;
     }
 }
 
 struct OutputView {
-    title: String,
+    title: Option<String>,
     buffer: Buffer,
     scroll: usize,
     last_page: usize,
@@ -87,6 +90,8 @@ struct OutputView {
     started_at: Instant,
     running: bool,
     status: String,
+    activity: Option<usize>,
+    result: Option<runner::RunOutput>,
     tone: Tone,
     find: Option<Input>,
     query: String,
@@ -96,7 +101,7 @@ struct OutputView {
 impl OutputView {
     fn new(title: String, vi: bool) -> Self {
         Self {
-            title,
+            title: Some(title),
             buffer: Buffer::default(),
             scroll: 0,
             last_page: 0,
@@ -105,7 +110,9 @@ impl OutputView {
             follow: false,
             started_at: Instant::now(),
             running: true,
-            status: text(["Running…", "Đang chạy…"], vi).into(),
+            status: format!("{}…", text(localization::RUNNING, vi)),
+            activity: None,
+            result: None,
             tone: Tone::Accent,
             find: None,
             query: String::new(),
@@ -148,40 +155,57 @@ impl OutputView {
         }
     }
 
-    fn finish(&mut self, result: Result<runner::RunOutput, String>) {
+    fn animate(&mut self) -> bool {
+        let phase = (self.started_at.elapsed().as_millis() / 125 % 8) as usize;
+        self.activity.replace(phase) != Some(phase)
+    }
+
+    fn status_line(&self) -> String {
+        const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+        self.activity.map_or_else(
+            || self.status.clone(),
+            |phase| format!("{} {}", SPINNER[phase], self.status),
+        )
+    }
+
+    fn finish(&mut self, result: Result<runner::RunOutput, String>, vi: bool) {
         self.running = false;
-        match result {
-            Ok(result) => {
-                self.completed_status(result.outcome, result.exit_code, result.elapsed_ms);
-            }
+        self.activity = None;
+        self.result = Some(match result {
+            Ok(result) => result,
             Err(error) => {
                 self.buffer =
                     Buffer::from_streams(String::new(), &runner::sanitize(error.as_bytes()), None);
-                self.completed_status(
-                    runner::Outcome::Fail,
-                    None,
-                    self.started_at.elapsed().as_millis(),
-                );
+                runner::RunOutput {
+                    outcome: runner::Outcome::Fail,
+                    exit_code: None,
+                    elapsed_ms: self.started_at.elapsed().as_millis(),
+                }
             }
-        }
+        });
+        self.localize_status(vi);
     }
 
-    fn completed_status(
-        &mut self,
-        outcome: runner::Outcome,
-        exit_code: Option<i32>,
-        elapsed_ms: u128,
-    ) {
-        let (symbol, tone) = match outcome {
-            runner::Outcome::Pass => ("✓", Tone::Success),
-            runner::Outcome::Fail => ("✗", Tone::Error),
-            _ => ("!", Tone::Warning),
+    fn localize_status(&mut self, vi: bool) {
+        let Some(result) = &self.result else {
+            self.status = format!("{}…", text(localization::RUNNING, vi));
+            return;
         };
-        let code = exit_code.map_or_else(|| "?".into(), |code| code.to_string());
+        let (symbol, tone, label) = match result.outcome {
+            runner::Outcome::Pass => ("✓", Tone::Success, localization::SUCCEEDED),
+            runner::Outcome::Fail => ("✗", Tone::Error, localization::FAILED),
+            runner::Outcome::Cancelled => ("!", Tone::Warning, localization::CANCELLED),
+        };
+        let code = result
+            .exit_code
+            .map_or_else(|| "?".into(), |code| code.to_string());
         self.tone = tone;
         self.status = format!(
-            "{symbol} {} · Exit {code} · Duration {elapsed_ms} ms",
-            outcome.label()
+            "{symbol} {} · {} {code} · {} {} ms",
+            text(label, vi),
+            text(localization::EXIT, vi),
+            text(localization::DURATION, vi),
+            result.elapsed_ms,
         );
     }
 }
@@ -190,6 +214,7 @@ enum Effect {
     Idle,
     Redraw,
     Run(Vec<String>),
+    Native(String),
     Cancel,
     Exit,
 }
@@ -318,18 +343,17 @@ impl Menu {
     fn switch_language(&mut self, vi: bool) {
         let selected = self.items.get(self.selected).copied();
         if let Some(output) = &mut self.output {
-            for status in [
-                ["Running…", "Đang chạy…"],
-                ["Cancelling…", "Đang hủy…"],
-                runner::CANNOT_CANCEL,
-            ] {
-                if output.status == text(status, self.vi) {
-                    output.status = text(status, vi).into();
-                    break;
-                }
+            let transient = [["Cancelling…", "Đang hủy…"], runner::CANNOT_CANCEL]
+                .into_iter()
+                .find(|status| output.status == text(*status, self.vi));
+            if let Some(status) = transient {
+                output.status = text(status, vi).into();
+            } else {
+                output.localize_status(vi);
             }
         }
         self.vi = vi;
+        localization::set_language(vi);
         self.completer = Completer::new(vi);
         self.refilter();
         if let Some(index) = self
@@ -457,16 +481,47 @@ impl Menu {
         if count == 0 || prompt.error == Some(COMMAND_TOO_LONG) {
             return Effect::Idle;
         }
-        let (index, base) = prompt.accepted.take().map_or_else(
-            || (if backwards { count - 1 } else { 0 }, prompt.input.clone()),
-            |(index, base)| {
-                (
-                    (index + if backwards { count - 1 } else { 1 }) % count,
-                    base,
-                )
-            },
-        );
-        let completion = &prompt.completions[index];
+        let index = if let Some((index, _)) = &prompt.accepted {
+            (index + if backwards { count - 1 } else { 1 }) % count
+        } else if backwards && prompt.focus == 0 {
+            count - 1
+        } else {
+            prompt.focus.min(count - 1)
+        };
+        self.accept_completion(index)
+    }
+
+    fn focus_completion(&mut self, index: usize) -> Effect {
+        let Some(prompt) = self
+            .prompt
+            .as_mut()
+            .filter(|prompt| !prompt.edited && prompt.error.is_none())
+        else {
+            return Effect::Idle;
+        };
+        if index >= prompt.completions.len() || prompt.focus == index {
+            return Effect::Idle;
+        }
+        prompt.focus = index;
+        Effect::Redraw
+    }
+
+    fn accept_completion(&mut self, index: usize) -> Effect {
+        let Some(prompt) = self
+            .prompt
+            .as_mut()
+            .filter(|prompt| !prompt.edited && prompt.error.is_none())
+        else {
+            return Effect::Idle;
+        };
+        let Some(completion) = prompt.completions.get(index) else {
+            return Effect::Idle;
+        };
+        let base = prompt
+            .accepted
+            .as_ref()
+            .map_or(&prompt.input, |(_, base)| base)
+            .clone();
         let range = completion.insert_range.clone();
         if !prompt
             .input
@@ -475,6 +530,7 @@ impl Menu {
             return Effect::Idle;
         }
         prompt.accepted = Some((index, base));
+        prompt.focus = index;
         prompt.error = None;
         self.history_index = None;
         Effect::Redraw
@@ -512,6 +568,26 @@ impl Menu {
         if prompt.input.value.trim().is_empty() || prompt.error == Some(COMMAND_TOO_LONG) {
             return Effect::Idle;
         }
+        let first = prompt
+            .input
+            .value
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        if first != "cnl"
+            && first != "cnl.exe"
+            && first != "clear"
+            && !first.starts_with('-')
+            && completion::grammar().find_subcommand(first).is_none()
+        {
+            if self.output.as_ref().is_some_and(|output| output.running) {
+                prompt.error = Some(["A command is still running.", "Một lệnh đang chạy."]);
+                return Effect::Redraw;
+            }
+            let native = prompt.input.value.clone();
+            self.close_main_prompt();
+            return Effect::Native(native);
+        }
         let Ok(mut args) = completion::arguments(&prompt.input.value) else {
             prompt.error = Some([
                 "Close the quoted argument.",
@@ -519,7 +595,10 @@ impl Menu {
             ]);
             return Effect::Redraw;
         };
-        if args.first().is_some_and(|word| word == "cnl") {
+        if args
+            .first()
+            .is_some_and(|word| matches!(word.as_str(), "cnl" | "cnl.exe"))
+        {
             args.remove(0);
         }
         if let Some(vi) = crate::cli::local_terminal_language(&args) {
@@ -940,6 +1019,7 @@ fn show(
     let mut last_size_check = Instant::now();
     let mut paste_continuation = 0;
     let mut clipboard = SystemClipboard;
+    let animate = color && std::env::var_os("CNL_REDUCED_MOTION").is_none();
     loop {
         if let Some(worker) = &mut running {
             worker.set_language(menu.vi);
@@ -958,9 +1038,11 @@ fn show(
                     redraw = true;
                 }
                 if let Some(result) = update.result {
-                    output.finish(Ok(result));
+                    output.finish(Ok(result), menu.vi);
                     running = None;
                     redraw = true;
+                } else if animate {
+                    redraw |= output.animate();
                 }
             }
         }
@@ -1024,8 +1106,48 @@ fn show(
                     }
                     redraw = true;
                 }
+                Effect::Native(line) => {
+                    menu.begin_output(&[]);
+                    let output = menu.output.as_mut().expect("output was created");
+                    output.title = None;
+                    match runner::Runner::start_native(&line, menu.vi) {
+                        Ok(worker) => {
+                            output.follow = true;
+                            running = Some(worker);
+                        }
+                        Err(error) => output.finish(Err(error.to_string()), menu.vi),
+                    }
+                    redraw = true;
+                }
                 Effect::Run(args) => {
                     menu.begin_output(&args);
+                    if let Some(shell) = native_shell_request(&args) {
+                        drop(screen);
+                        let started = Instant::now();
+                        let result = crate::cli::native::interactive(shell.as_deref())
+                            .map(|status| runner::RunOutput {
+                                outcome: if status.success() {
+                                    runner::Outcome::Pass
+                                } else {
+                                    runner::Outcome::Fail
+                                },
+                                exit_code: status.code(),
+                                elapsed_ms: started.elapsed().as_millis(),
+                            })
+                            .map_err(|error| error.to_string());
+                        screen = Screen::enter(io::BufWriter::with_capacity(
+                            64 * 1024,
+                            io::stdout().lock(),
+                        ))?;
+                        painter = Painter::default();
+                        size = console::size()?;
+                        menu.output
+                            .as_mut()
+                            .expect("output was created")
+                            .finish(result, menu.vi);
+                        redraw = true;
+                        break;
+                    }
                     match runner::Runner::start(workspace, flags, &args, menu.vi) {
                         Ok(worker) => {
                             menu.output.as_mut().expect("output was created").follow = true;
@@ -1035,7 +1157,7 @@ fn show(
                             .output
                             .as_mut()
                             .expect("output was created")
-                            .finish(Err(error.to_string())),
+                            .finish(Err(error.to_string()), menu.vi),
                     }
                     redraw = true;
                 }
@@ -1045,9 +1167,27 @@ fn show(
     }
 }
 
+fn native_shell_request(args: &[String]) -> Option<Option<String>> {
+    let matches = crate::cli::app()
+        .try_get_matches_from(std::iter::once("cnl").chain(args.iter().map(String::as_str)))
+        .ok()?;
+    if matches.get_flag("json") {
+        return None;
+    }
+    matches
+        .subcommand_matches("shell")
+        .map(|shell| shell.get_one::<String>("shell").cloned())
+}
+
 pub fn open(workspace: &Workspace, flags: &ArgMatches) -> anyhow::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        anyhow::bail!("cnl tui requires an interactive terminal");
+        anyhow::bail!(
+            "{}",
+            crate::localization::message([
+                "cnl tui requires an interactive terminal",
+                "cnl tui yêu cầu terminal tương tác"
+            ])
+        );
     }
     let vi = flags
         .get_one::<String>("lang")
@@ -1148,5 +1288,40 @@ mod state_tests {
         menu.open_prompt(Input::at_end("status".into()));
         assert!(matches!(menu.submit_prompt(), Effect::Redraw));
         assert!(menu.output.as_ref().unwrap().running);
+    }
+
+    #[test]
+    fn click_completion_inserts_only_and_enter_runs_it_in_both_layouts() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        for size in [(55, 18), (126, 31)] {
+            let mut menu = Menu::new(true);
+            menu.open_prompt(Input::at_end("repos clone re".into()));
+            let frame = view::frame(&mut menu, size, false, true);
+            let target = frame.suggestions.as_ref().expect("visible completion");
+            let mut clipboard = SystemClipboard;
+            for kind in [
+                MouseEventKind::Moved,
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                let effect = menu.mouse(
+                    MouseEvent {
+                        kind,
+                        column: target.columns.start,
+                        row: target.rows.start,
+                        modifiers: KeyModifiers::NONE,
+                    },
+                    Some(&frame),
+                    &mut clipboard,
+                );
+                assert!(matches!(effect, Effect::Idle | Effect::Redraw));
+            }
+            assert_eq!(
+                menu.prompt.as_ref().unwrap().input.value,
+                "repos clone remote"
+            );
+            assert!(menu.output.is_none());
+            assert!(matches!(menu.handle(key(KeyCode::Enter)), Effect::Run(_)));
+        }
     }
 }

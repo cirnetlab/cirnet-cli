@@ -5,9 +5,13 @@ const LIMIT: usize = 7;
 const MAX_INPUT: usize = 8192;
 
 pub(super) fn grammar() -> &'static Command {
-    static GRAMMAR: OnceLock<Command> = OnceLock::new();
-    GRAMMAR.get_or_init(|| {
-        let mut parser = crate::cli::app();
+    grammar_for(false)
+}
+
+fn grammar_for(vi: bool) -> &'static Command {
+    static GRAMMAR: [OnceLock<Command>; 2] = [const { OnceLock::new() }; 2];
+    GRAMMAR[usize::from(vi)].get_or_init(|| {
+        let mut parser = crate::cli::app_for(vi);
         parser.build();
         parser
     })
@@ -172,10 +176,11 @@ impl Completer {
         if previous.peek().is_some_and(|word| word.value == "cnl") {
             previous.next();
         }
-        let mut command = grammar();
+        let mut command = grammar_for(self.vi);
         let mut command_path = Vec::new();
         let mut value = None;
         let mut positional = 0;
+        let mut used_flags = Vec::new();
         for word in previous {
             if value.take().is_some() {
                 continue;
@@ -184,22 +189,35 @@ impl Completer {
                 return Vec::new();
             }
             if let Some(flag) = word.value.strip_prefix("--") {
-                if !flag.contains('=') {
-                    value = command.get_arguments().find(|arg| {
-                        arg.get_long() == Some(flag) && arg.get_action().takes_values()
-                    });
-                }
+                used_flags.push(flag.split('=').next().unwrap_or(flag));
+                let arg = command
+                    .get_arguments()
+                    .find(|arg| arg.get_long() == used_flags.last().copied());
+                let Some(arg) = arg else { return Vec::new() };
+                value = (!flag.contains('=') && arg.get_action().takes_values()).then_some(arg);
             } else if let Some(child) = command.find_subcommand(word.value.as_ref()) {
                 command = child;
                 command_path.push(child.get_name());
                 positional = 0;
             } else {
+                let found_positional = command.get_arguments().any(|arg| {
+                    arg.get_index().is_some_and(|index| {
+                        index == positional + 1
+                            || index <= positional
+                                && matches!(arg.get_action(), clap::ArgAction::Append)
+                    })
+                });
+                if !found_positional {
+                    return Vec::new();
+                }
                 positional += 1;
             }
         }
 
         let mut candidates = Vec::new();
         let mut insert = range;
+        let flag_prefix = input[insert.start..cursor].starts_with('-');
+        let explicit_flag = cursor - insert.start > 2;
         if let Some((flag, _)) = input[insert.start..cursor]
             .strip_prefix("--")
             .and_then(|part| part.split_once('='))
@@ -214,7 +232,7 @@ impl Completer {
         } else {
             for child in command
                 .get_subcommands()
-                .filter(|child| !child.is_hide_set())
+                .filter(|child| !child.is_hide_set() && !flag_prefix && child.get_name() != "help")
             {
                 let label = command_path
                     .iter()
@@ -235,18 +253,33 @@ impl Completer {
             }
             for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
                 if let Some(flag) = arg.get_long() {
+                    let repeatable = matches!(
+                        arg.get_action(),
+                        clap::ArgAction::Append | clap::ArgAction::Count
+                    );
+                    if (!repeatable && used_flags.contains(&flag))
+                        || (arg.is_global_set() && !command_path.is_empty() && !explicit_flag)
+                        || (arg.is_global_set() && !flag_prefix)
+                        || (flag == "all" && (used_flags.contains(&"repo") || positional > 0))
+                        || (flag == "repo" && used_flags.contains(&"all"))
+                    {
+                        continue;
+                    }
                     let text = format!("--{flag}");
                     candidates.push((
                         text.clone(),
                         text,
-                        arg.get_help().map_or_else(String::new, ToString::to_string),
+                        arg.get_help().map(ToString::to_string).unwrap_or_default(),
                         Kind::Option,
                     ));
-                } else if arg.get_index().is_some_and(|index| {
-                    index == positional + 1
-                        || index <= positional
-                            && matches!(arg.get_action(), clap::ArgAction::Append)
-                }) {
+                } else if !flag_prefix
+                    && !used_flags.contains(&"all")
+                    && arg.get_index().is_some_and(|index| {
+                        index == positional + 1
+                            || index <= positional
+                                && matches!(arg.get_action(), clap::ArgAction::Append)
+                    })
+                {
                     Self::values(&mut candidates, arg);
                 }
             }
@@ -283,8 +316,12 @@ impl Completer {
             })
             .collect::<Vec<_>>();
         ranked.sort_by(|(left_score, left), (right_score, right)| {
+            fn priority(kind: Kind) -> u8 {
+                u8::from(kind == Kind::Option)
+            }
             left_score
                 .cmp(right_score)
+                .then_with(|| priority(left.kind).cmp(&priority(right.kind)))
                 .then_with(|| left.text.cmp(&right.text))
         });
         ranked.dedup_by(|(_, left), (_, right)| left.text == right.text);
@@ -316,9 +353,105 @@ impl Completer {
     }
 }
 
+pub(crate) fn command() -> Command {
+    Command::new("completion").arg(
+        Arg::new("shell")
+            .required(true)
+            .value_parser(["powershell", "bash"]),
+    )
+}
+
+pub(crate) fn query_command() -> Command {
+    Command::new("__complete")
+        .hide(true)
+        .arg(
+            Arg::new("cursor")
+                .long("cursor")
+                .required(true)
+                .value_parser(clap::value_parser!(usize)),
+        )
+        .arg(Arg::new("line").last(true).required(true))
+}
+
+pub(crate) fn emit(args: &clap::ArgMatches) -> anyhow::Result<()> {
+    use std::io::Write;
+    let script = match args.get_one::<String>("shell").map(String::as_str) {
+        Some("powershell") => {
+            r#"Register-ArgumentCompleter -Native -CommandName cnl,cnl.exe -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+    $line = $commandAst.Extent.Text
+    $cursor = [Math]::Max($cursorPosition - $commandAst.Extent.StartOffset, 0)
+    $line += ' ' * [Math]::Max(0, $cursor - $line.Length)
+    $offset = [Text.Encoding]::UTF8.GetByteCount($line.Substring(0, $cursor))
+    $prefix = if ($wordToComplete -match '^(--[^=]+=)') { $Matches[1] } else { '' }
+    & cnl __complete --cursor $offset -- $line 2>$null | ForEach-Object {
+        [Management.Automation.CompletionResult]::new("$prefix$_")
+    }
+}
+"#
+        }
+        Some("bash") => {
+            r#"_cnl_complete() {
+    mapfile -t COMPREPLY < <(cnl __complete --cursor "$COMP_POINT" -- "$COMP_LINE" 2>/dev/null)
+}
+complete -F _cnl_complete cnl
+"#
+        }
+        _ => unreachable!("shell is validated by Clap"),
+    };
+    Ok(std::io::stdout().lock().write_all(script.as_bytes())?)
+}
+
+pub(crate) fn query(args: &clap::ArgMatches) -> anyhow::Result<()> {
+    use std::io::Write;
+    let line = args
+        .get_one::<String>("line")
+        .expect("required command line");
+    let cursor = *args.get_one::<usize>("cursor").expect("required cursor");
+    let Ok(words) = tokens(line) else {
+        return Ok(());
+    };
+    let Some(executable) = words.first() else {
+        return Ok(());
+    };
+    let executable = if executable.value == "&" {
+        words.get(1).unwrap_or(executable)
+    } else {
+        executable
+    };
+    let start = executable.range.end;
+    if cursor >= start {
+        let offset = cursor - start;
+        let mut output = std::io::stdout().lock();
+        for choice in Completer::new(false).suggestions(&line[start..], offset) {
+            writeln!(output, "{}", choice.text)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suppresses_unrelated_globals_consumed_options_and_conflicting_scopes() {
+        let completer = Completer::new(false);
+        let choices = |input: &str| {
+            completer
+                .suggestions(input, input.len())
+                .into_iter()
+                .map(|item| item.text)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(choices("stop --"), ["--desktop", "--dry-run", "--help"]);
+        assert_eq!(choices("stop --pr"), ["--profile"]);
+        assert!(!choices("run --desktop interface --de").contains(&"--desktop".to_owned()));
+        assert!(!choices("repos clone remote --a").contains(&"--all".to_owned()));
+        assert!(choices("repos clone --all re").is_empty());
+        assert!(choices("git ").is_empty());
+        assert!(choices("run --bogus ").is_empty());
+    }
 
     #[test]
     fn suggests_subcommands_and_parser_values_at_the_cursor() {

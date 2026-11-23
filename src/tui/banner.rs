@@ -121,8 +121,10 @@ fn compose_with(
     for y in 0..=art.len() {
         let mut line = Line::default();
         line.push(Tone::Plain, " ".repeat(inset));
+        let vertical_shade = y * 3 / art.len().max(1);
         for x in 0..available.min(width + 3) {
-            let gradient = (x.saturating_sub(1) * 4 / width.max(1)).min(3);
+            let horizontal_shade = usize::from(x.saturating_sub(1) >= width.div_ceil(2));
+            let gradient = (vertical_shade + horizontal_shade).min(3);
             let (tone, glyph) = cell(
                 classify(&art, x, y * 2, color),
                 classify(&art, x, y * 2 + 1, color),
@@ -170,7 +172,7 @@ mod tests {
             (Tone::SoftOverShadow, '▀')
         );
         let lines = compose(&["▀▄"], 2, 0, true);
-        assert!(lines[0].has(Tone::BannerOnShadow(2, true)));
+        assert!(lines[0].has(Tone::BannerOnShadow(1, true)));
     }
 
     #[test]

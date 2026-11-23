@@ -11,6 +11,8 @@
 - Added English and Vietnamese CNL and Cargo command references.
 - Run build and verification subprocesses in their owned directories. Bind candidate selection to its workspace and profile.
 - Reset menu drafts between commands, switch TUI language in place and preserve subprocess output streams.
+- Default to development mode for `run`, retain `dev` compatibility and add target-aware Stop, runtime logs and multi-repository scopes.
+- Add contextual shell and mouse completion, native shell delegation, localized command help and results, and refresh the terminal wordmark, context menu and activity feedback.
 
 ### Tiếng Việt
 
@@ -21,3 +23,5 @@
 - Thêm tham chiếu lệnh CNL và Cargo bằng tiếng Anh và tiếng Việt.
 - Chạy tiến trình build và kiểm chứng trong thư mục phù hợp. Gắn lựa chọn ứng viên với workspace và hồ sơ.
 - Xóa nội dung nhập tạm khi đổi lệnh, đổi ngôn ngữ ngay trong TUI và giữ riêng các luồng đầu ra.
+- Dùng chế độ phát triển làm mặc định cho `run`, giữ tương thích với `dev`, bổ sung Stop theo đích, nhật ký runtime và thao tác trên nhiều repo.
+- Bổ sung gợi ý theo ngữ cảnh trên shell và bằng chuột, hỗ trợ shell native, bản địa hóa trợ giúp và kết quả, đồng thời cập nhật chữ nổi, menu ngữ cảnh và hiệu ứng chờ.
