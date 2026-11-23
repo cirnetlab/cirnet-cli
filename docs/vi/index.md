@@ -31,8 +31,6 @@ CLI tìm workspace từ thư mục hiện hành, sau đó từ các thư mục c
 
 Chạy `cnl` hoặc `cnl tui` trong terminal. Dùng `--lang vi` để chọn tiếng Việt hoặc đặt `NO_COLOR=1` để tắt màu. Dùng phím mũi tên để chọn lệnh, `/` để tìm, `:` để nhập và Tab để duyệt gợi ý. Dùng Ctrl+R để xem lịch sử, Page Up và Page Down để cuộn kết quả và Ctrl+F để tìm nội dung. Trình nhập hỗ trợ chọn văn bản Unicode, hoàn tác, làm lại và clipboard Windows. Esc hủy lệnh có thể hủy. Dùng `cnl stop` để dừng dịch vụ native và Vite.
 
-Terminal chuyển thể menu CNR từ [CIRNET Rules](https://github.com/cirnetlab/cirnet-rules/tree/646afa38516bbfd276b0aecb7a138ab427df5fa9/src/cli/menu) theo giấy phép GPL-3.0. Các tệp được tái sử dụng ghi rõ commit nguồn.
-
 ## Phát triển và kiểm chứng
 
 Dùng `cnl dev --desktop interface --initialize-db` để phục vụ mã Interface đang làm việc qua Vite, với proxy API và WebSocket hiện có. Chọn cổng phát triển khác khi cổng mặc định đang được dùng. CLI kiểm tra HTTP, trang Interface và tuyến WebSocket có xác thực trước khi mở trình duyệt. Launcher native cho phép origin loopback của Vite theo cổng đã chọn. Khi đổi ứng viên, CLI lưu cache đã kiểm chứng trước đó trong thư mục `.runtime/` do Git bỏ qua. Cần kiểm tra các nội dung cache không nhận diện được.

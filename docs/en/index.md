@@ -31,8 +31,6 @@ The CLI searches the working directory and then the executable's ancestors. For 
 
 Run `cnl` or `cnl tui` in a terminal. Use `--lang vi` for Vietnamese or set `NO_COLOR=1` for monochrome. Use the arrow keys to select a command, `/` to search, `:` to enter a command, and Tab to cycle completions. Use Ctrl+R for history, Page Up and Page Down to scroll results, and Ctrl+F to find text in a result. The editor supports Unicode selection, undo, redo and the Windows clipboard. Esc cancels a cancellable command. Use `cnl stop` for native and Vite services.
 
-The interactive terminal adapts the CNR menu from [CIRNET Rules](https://github.com/cirnetlab/cirnet-rules/tree/646afa38516bbfd276b0aecb7a138ab427df5fa9/src/cli/menu) under GPL-3.0. The reused source files record the originating revision.
-
 ## Develop and verify
 
 Start with `cnl dev --desktop interface --initialize-db` to serve the live Interface checkout through Vite, with its existing API and WebSocket proxies. Choose a different development port when the default is occupied. The CLI checks HTTP, the served Interface and the protected WebSocket route before opening the browser. The native launcher trusts the selected Vite loopback origin. When the candidate changes, the CLI preserves the previous verified input cache under the ignored `.runtime/` directory. Unrecognized cache contents require inspection.
