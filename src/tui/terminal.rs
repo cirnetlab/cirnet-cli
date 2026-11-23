@@ -1,4 +1,3 @@
-// Derived from CIRNET Rules CNR, commit 646afa38516bbfd276b0aecb7a138ab427df5fa9 (GPL-3.0).
 #[cfg(not(windows))]
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::{

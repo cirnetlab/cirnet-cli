@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::process::{capture, run};
+use crate::process::{capture, isolate_git, run};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Repo {
@@ -258,14 +258,7 @@ impl Workspace {
 fn git(path: &Path) -> Command {
     let mut command = Command::new("git");
     command.args(["--no-optional-locks", "-C"]).arg(path);
-    for name in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_COMMON_DIR",
-    ] {
-        command.env_remove(name);
-    }
+    isolate_git(&mut command);
     command
 }
 

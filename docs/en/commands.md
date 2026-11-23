@@ -33,7 +33,7 @@ The rest of this reference uses `cnl`. If it is not on PATH, call the executable
 | `--workspace <DIR>` | Select the parent directory of the checkouts. This overrides `CNL_WORKSPACE`. Without either, the CLI searches the ancestors of the working directory and then those of the executable. |
 | `--state-dir <ABSOLUTE_DIR>` | Select an absolute directory outside Git checkouts for profiles, local SQLite databases, and build artifacts. The default is a per-workspace directory under `%LOCALAPPDATA%\CIRNETLAB`. |
 | `--profile <NAME>` | Select a profile. Default `windows-x64`. Use letters, digits, hyphens or underscores. Use the same workspace, state directory and profile for all steps in one lifecycle. |
-| `--json` | Emit a structured report on stdout for automation. |
+| `--json` | Write the structured report to stdout. Subprocess progress on stdout is suppressed in this mode. Subprocess diagnostics stay on stderr. |
 | `--lang en\|vi` | Set the interactive terminal language. Default `en`. |
 | `-h`, `--help` | Show help for the selected command. |
 | `-V`, `--version` | Show the CLI version at the top level. |
@@ -97,7 +97,7 @@ cnl setup --browser
 cnl verify
 ```
 
-Use `--initialize-db` on the first launch of each fresh profile. If the CLI cannot find a candidate, run `cnl build --all` with the same profile or pass `--receipt`. For a long Windows build path, select a short external directory with `--state-dir`.
+Use `--initialize-db` on the first launch of each fresh profile. A successful `build --all` replaces the selected receipt only after verifying the new candidate. The selection records the workspace, state directory, profile and manifest digest. The `receipt` field in the build report is the path to pass to `--receipt`. This option selects a candidate for the current invocation and keeps the saved selection. If the receipt is missing or invalid, build again in the same scope or use another verified receipt. For a long Windows build path, select a short external directory with `--state-dir`.
 
 Useful previews and focused checks
 

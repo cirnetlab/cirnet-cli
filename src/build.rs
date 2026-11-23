@@ -7,13 +7,13 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::ArgMatches;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
     environment::{State, write_json},
-    process::{capture, powershell, run},
+    process::{capture, isolate_git, powershell, run},
     workspace::{Repo, Workspace, canonical},
 };
 
@@ -32,37 +32,112 @@ impl Candidate {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SavedCandidate {
+    Scoped(CandidateSelection),
+    Legacy(PathBuf),
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CandidateSelection {
+    schema_version: u8,
+    workspace: PathBuf,
+    state_directory: PathBuf,
+    profile: String,
+    receipt: PathBuf,
+    manifest_sha256: String,
+}
+
+impl CandidateSelection {
+    fn new(workspace: &Workspace, state: &State, candidate: &Candidate) -> Self {
+        Self {
+            schema_version: 1,
+            workspace: workspace.root.clone(),
+            state_directory: state.dir.clone(),
+            profile: state.name.clone(),
+            receipt: candidate.receipt.clone(),
+            manifest_sha256: candidate.manifest_sha256.clone(),
+        }
+    }
+
+    fn validate_scope(&self, workspace: &Workspace, state: &State) -> Result<()> {
+        if self.schema_version != 1 {
+            bail!(
+                "Unsupported candidate selection schema {}",
+                self.schema_version
+            );
+        }
+        if self.workspace != workspace.root
+            || self.state_directory != state.dir
+            || self.profile != state.name
+        {
+            bail!(
+                "Candidate selection belongs to workspace {}, profile {}, state {}. Use that scope or choose a different --state-dir or --profile",
+                self.workspace.display(),
+                self.profile,
+                self.state_directory.display()
+            );
+        }
+        Ok(())
+    }
+}
+
 pub fn candidate(
     workspace: &Workspace,
     state: &State,
     receipt: Option<&PathBuf>,
 ) -> Result<Candidate> {
-    let path = match receipt {
-        Some(path) => path.clone(),
-        None => {
-            let latest: PathBuf = serde_json::from_slice(
-                &fs::read(state.dir.join("candidate.json"))
-                    .with_context(|| format!(
-                        "Cannot read the candidate for profile {}. Run cnl build --all with the same workspace and profile, or pass --receipt <assembly-result.json>",
-                        state.dir.display()
-                    ))?,
-            )?;
-            latest
-        }
+    let pointer = state.dir.join("candidate.json");
+    let (path, digest) = if let Some(receipt) = receipt {
+        (receipt.clone(), None)
+    } else {
+        let saved = (|| -> Result<_> {
+            match serde_json::from_slice(&fs::read(&pointer)?)? {
+                SavedCandidate::Scoped(record) => {
+                    record.validate_scope(workspace, state)?;
+                    if !record.receipt.is_absolute() || !valid_sha(&record.manifest_sha256) {
+                        bail!("Invalid recorded receipt path or manifest digest");
+                    }
+                    Ok((record.receipt, Some(record.manifest_sha256)))
+                }
+                SavedCandidate::Legacy(path) if path.is_absolute() => Ok((path, None)),
+                SavedCandidate::Legacy(_) => bail!("The legacy receipt path must be absolute"),
+            }
+        })();
+        saved.with_context(|| format!(
+            "Cannot select a candidate for workspace {}, profile {}, state {}. Expected selection file {}. Run cnl build --all with the same scope, or pass --receipt <assembly-result.json>",
+            workspace.root.display(), state.name, state.dir.display(), pointer.display(),
+        ))?
     };
-    let path = canonical(&path)?;
+    read_candidate(workspace, &path, digest.as_deref()).with_context(|| format!(
+        "Cannot use receipt {} for workspace {}, profile {}, state {}. Pass a valid --receipt <assembly-result.json> or run cnl build --all with the same scope",
+        path.display(), workspace.root.display(), state.name, state.dir.display(),
+    ))
+}
+
+fn read_candidate(workspace: &Workspace, path: &Path, digest: Option<&str>) -> Result<Candidate> {
+    let path = canonical(path)?;
     let mut candidate: Candidate = serde_json::from_slice(&fs::read(&path)?)?;
     candidate.receipt = path;
     if candidate.directory.parent() != Some(candidate.session())
+        || canonical(&candidate.directory)? != candidate.directory
+        || !candidate.directory.is_dir()
         || !valid_sha(&candidate.manifest_sha256)
     {
         bail!("Candidate receipt must pin a build in its own output session");
     }
+    if digest.is_some_and(|expected| expected != candidate.manifest_sha256) {
+        bail!("Candidate receipt digest differs from the recorded selection");
+    }
     let remote = workspace.require(Repo::Remote)?;
-    run(Command::new("node")
+    let mut verifier = Command::new("node");
+    verifier
         .arg(remote.join("scripts/verify-native-windows.mjs"))
         .arg(&candidate.directory)
-        .arg(&candidate.manifest_sha256))?;
+        .arg(&candidate.manifest_sha256);
+    capture(in_build_directory(&mut verifier, &remote))?;
     Ok(candidate)
 }
 
@@ -109,21 +184,30 @@ pub fn build(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result<
         workspace.require(repo)?;
     }
     let _lock = state.lock()?;
+    let pointer = state.dir.join("candidate.json");
+    if all
+        && let Ok(bytes) = fs::read(&pointer)
+        && let Ok(SavedCandidate::Scoped(record)) = serde_json::from_slice(&bytes)
+    {
+        record.validate_scope(workspace, state)?;
+    }
     let output = output_dir(&state.dir.join("builds"), "build")?;
     if all {
         let remote = workspace.require(Repo::Remote)?;
         let selection = output.join("selection.json");
-        run(Command::new("node")
+        let mut select = Command::new("node");
+        select
             .arg(remote.join("scripts/native-source-selection.mjs"))
             .arg("lock")
-            .arg(&selection))?;
+            .arg(&selection);
+        run(in_build_directory(&mut select, &remote))?;
         let driver = output.join("build.ps1");
         fs::write(&driver, include_str!("../scripts/windows-build.ps1"))?;
         let mut command = powershell();
         command
             .arg(driver)
             .arg("-Remote")
-            .arg(remote)
+            .arg(&remote)
             .arg("-Selection")
             .arg(selection)
             .arg("-OutputParent")
@@ -131,7 +215,7 @@ pub fn build(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result<
         if args.get_flag("offline") {
             command.arg("-Offline");
         }
-        run(&mut command)?;
+        run(in_build_directory(&mut command, &remote))?;
         let mut receipts = Vec::new();
         for entry in fs::read_dir(&output)? {
             let path = entry?.path().join("assembly-result.json");
@@ -144,7 +228,7 @@ pub fn build(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result<
         }
         let receipt = receipts.pop().unwrap();
         let build = candidate(workspace, state, Some(&receipt))?;
-        write_json(&state.dir.join("candidate.json"), &build.receipt)?;
+        write_json(&pointer, &CandidateSelection::new(workspace, state, &build))?;
         return Ok(
             json!({"state":"built","buildOrder":names,"receipt":build.receipt,"bundle":build.directory,
             "manifestSha256":build.manifest_sha256}),
@@ -186,13 +270,13 @@ pub fn prepare_web(web: &Path, candidate: &Candidate, offline: bool) -> Result<(
     let ownership: Value = serde_json::from_slice(&fs::read(
         candidate.session().join(".cirnet-artifact-session.json"),
     )?)?;
-    run(Command::new("node")
+    let mut bootstrap = Command::new("node");
+    run(in_build_directory(&mut bootstrap, web)
         .arg(web.join("scripts/bootstrap-contracts.mjs"))
         .arg("--manifest")
         .arg(&inputs)
         .env("CIRNET_ARTIFACTS_CONTEXT", ownership["context"].to_string())
-        .env("CIRNET_ARTIFACTS_SESSION", candidate.session())
-        .current_dir(web))?;
+        .env("CIRNET_ARTIFACTS_SESSION", candidate.session()))?;
     let mut npm = Command::new("npm.cmd");
     npm.args(["ci", "--ignore-scripts", "--no-audit", "--no-fund"])
         .current_dir(web);
@@ -251,12 +335,13 @@ fn preserve_old_web_inputs(web: &Path, selected: &Value) -> Result<()> {
     {
         return Ok(());
     }
-    let ignored = capture(Command::new("git").current_dir(web).args([
-        "check-ignore",
-        "--",
-        ".artifacts/",
-        ".runtime/",
-    ]))?;
+    let mut git = Command::new("git");
+    isolate_git(&mut git);
+    let ignored =
+        capture(
+            git.current_dir(web)
+                .args(["check-ignore", "--", ".artifacts/", ".runtime/"]),
+        )?;
     if !ignored.lines().any(|line| line == ".artifacts/")
         || !ignored.lines().any(|line| line == ".runtime/")
         || canonical(&cache)? != cache
@@ -328,7 +413,7 @@ pub fn verify(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result
             .cloned()
             .or_else(|| default_browser.is_dir().then_some(default_browser));
         let mut command = Command::new("node");
-        command
+        in_build_directory(&mut command, candidate.session())
             .arg(runner)
             .arg(&candidate.directory)
             .arg(&candidate.manifest_sha256);
@@ -395,17 +480,37 @@ fn cargo(root: &Path, output: &Path, task: &str, offline: bool) -> Result<()> {
     let driver = output.join("cargo.ps1");
     fs::write(&driver, include_str!("../scripts/windows-build.ps1"))?;
     let mut command = powershell();
-    command
+    in_build_directory(&mut command, root)
         .arg(driver)
         .arg("-Component")
         .arg(root)
         .args(["-CargoOperation", task])
-        .env("CARGO_TARGET_DIR", output.join("cargo"))
-        .current_dir(root);
+        .env("CARGO_TARGET_DIR", output.join("cargo"));
     if offline {
         command.arg("-Offline");
     }
     run(&mut command)
+}
+
+fn in_build_directory<'a>(command: &'a mut Command, directory: &Path) -> &'a mut Command {
+    isolate_git(command);
+    for name in [
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_TARGET_DIR",
+        "CARGO_BUILD_BUILD_DIR",
+        "CARGO_BUILD_DIR",
+        "CARGO_BUILD_TARGET",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTFLAGS",
+        "RUSTUP_TOOLCHAIN",
+        "CIRNET_ARTIFACTS_CONTEXT",
+        "CIRNET_ARTIFACTS_SESSION",
+        "NETCIRCUIT_ARTIFACTS_CONTEXT",
+        "NETCIRCUIT_ARTIFACTS_SESSION",
+    ] {
+        command.env_remove(name);
+    }
+    command.current_dir(directory)
 }
 
 fn simulator(root: &Path, output: &Path) -> Result<PathBuf> {
@@ -462,4 +567,104 @@ fn rtl(root: &Path, candidate: &Candidate, args: &ArgMatches, output: &Path) -> 
         .env_remove("NETCIRCUIT_ARTIFACTS_CONTEXT")
         .env("CIRNET_ARTIFACTS_CLI_SHA256", sha(&allocator)?)
         .env("CIRNET_ARTIFACTS_CLI", allocator))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn candidate_selection_pins_scope_and_digest_and_preserves_legacy_receipts() {
+        let root = output_dir(&env::temp_dir(), "cnl-candidate-test").unwrap();
+        let workspace = Workspace {
+            root: canonical(&root).unwrap(),
+        };
+        let state = State::resolve(&workspace, Some(&root.join("state")), "fixture").unwrap();
+        state.prepare().unwrap();
+        let pointer = state.dir.join("candidate.json");
+        let candidate = Candidate {
+            directory: root.join("bundle"),
+            manifest_sha256: "a".repeat(64),
+            receipt: root.join("assembly-result.json"),
+        };
+        let record = CandidateSelection::new(&workspace, &state, &candidate);
+        write_json(&pointer, &candidate.receipt).unwrap();
+        let legacy: SavedCandidate = serde_json::from_slice(&fs::read(&pointer).unwrap()).unwrap();
+        assert!(matches!(legacy, SavedCandidate::Legacy(path) if path == candidate.receipt));
+
+        write_json(&pointer, &record).unwrap();
+        let bytes = fs::read(&pointer).unwrap();
+        let SavedCandidate::Scoped(roundtrip) = serde_json::from_slice(&bytes).unwrap() else {
+            panic!("expected an atomically replaced scoped candidate");
+        };
+        assert_eq!(roundtrip.receipt, candidate.receipt);
+        assert_eq!(roundtrip.manifest_sha256, candidate.manifest_sha256);
+        roundtrip.validate_scope(&workspace, &state).unwrap();
+        for (wrong_workspace, wrong_state) in [
+            (
+                Workspace {
+                    root: workspace.root.join("other"),
+                },
+                State::resolve(&workspace, Some(&root.join("state")), "fixture").unwrap(),
+            ),
+            (
+                Workspace {
+                    root: workspace.root.clone(),
+                },
+                State::resolve(&workspace, Some(&root.join("state")), "other").unwrap(),
+            ),
+            (
+                Workspace {
+                    root: workspace.root.clone(),
+                },
+                State::resolve(&workspace, Some(&root.join("other-state")), "fixture").unwrap(),
+            ),
+        ] {
+            assert!(
+                roundtrip
+                    .validate_scope(&wrong_workspace, &wrong_state)
+                    .is_err()
+            );
+        }
+
+        let failed = candidate_for_test(&workspace, &state, None);
+        assert!(
+            failed.contains("assembly-result.json")
+                && failed.contains("--receipt")
+                && failed.contains("fixture"),
+            "{failed}"
+        );
+        let alternate = candidate_for_test(&workspace, &state, Some(&root.join("alternate.json")));
+        assert!(alternate.contains("alternate.json"), "{alternate}");
+        assert_eq!(fs::read(&pointer).unwrap(), bytes);
+    }
+
+    fn candidate_for_test(workspace: &Workspace, state: &State, path: Option<&PathBuf>) -> String {
+        format!("{:#}", candidate(workspace, state, path).unwrap_err())
+    }
+
+    #[test]
+    fn subprocess_directory_and_artifact_overrides_are_independent_of_the_caller() {
+        let root = env::current_dir().unwrap();
+        let mut command = Command::new("node");
+        let names = [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "CARGO_TARGET_DIR",
+            "CIRNET_ARTIFACTS_CONTEXT",
+        ];
+        for name in names {
+            command.env(name, "ambient override");
+        }
+        in_build_directory(&mut command, &root);
+        assert_eq!(command.get_current_dir(), Some(root.as_path()));
+        for name in names {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == name && value.is_none()),
+                "{name}"
+            );
+        }
+    }
 }

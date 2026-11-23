@@ -1,4 +1,3 @@
-// Derived from CIRNET Rules CNR, commit 646afa38516bbfd276b0aecb7a138ab427df5fa9 (GPL-3.0).
 use super::terminal::{Line, Tone};
 
 pub(super) const WORDMARK_WIDTH: usize = 74;

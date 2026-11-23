@@ -118,6 +118,7 @@ pub fn start(workspace: &Workspace, state: &State, args: &ArgMatches, dev: bool)
         include_str!("../scripts/probe.mjs"),
     )?;
     let (fingerprint, launcher_hash, remote_hash) = runtime_identity(&candidate)?;
+    let receipt = candidate.receipt.clone();
     let mut native = launcher(
         &candidate.directory,
         &candidate.manifest_sha256,
@@ -223,7 +224,8 @@ pub fn start(workspace: &Workspace, state: &State, args: &ArgMatches, dev: bool)
         }
     }
     Ok(
-        json!({"state":"ready","url":url,"native":backend,"ports":profile,"logDirectory":instance.log_dir}),
+        json!({"state":"ready","url":url,"native":backend,"ports":profile,"logDirectory":instance.log_dir,
+            "receipt":receipt,"manifestSha256":instance.digest}),
     )
 }
 
@@ -425,6 +427,7 @@ fn runtime_identity(candidate: &Candidate) -> Result<(String, String, String)> {
 
 fn launcher(bundle: &Path, digest: &str, data: &Path, profile: &Profile, action: &str) -> Command {
     let mut command = powershell();
+    command.current_dir(bundle);
     command
         .arg(bundle.join("cirnet-native.ps1"))
         .args(["-Action", action, "-ManifestSha256", digest])

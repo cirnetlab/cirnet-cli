@@ -1,4 +1,3 @@
-// Derived from CIRNET Rules CNR, commit 646afa38516bbfd276b0aecb7a138ab427df5fa9 (GPL-3.0).
 use super::{printable, runner, text_modifiers};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::{collections::VecDeque, ops::Range};

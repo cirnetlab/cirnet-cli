@@ -9,6 +9,8 @@
 - Adapted the CNR terminal menu, orange wordmark and incremental painter. Added localized editing, command completion and bounded live output.
 - Made workspace discovery follow the executable and added `--desktop interface` for verified native and Vite starts.
 - Added English and Vietnamese CNL and Cargo command references.
+- Run build and verification subprocesses in their owned directories. Bind candidate selection to its workspace and profile.
+- Reset menu drafts between commands, switch TUI language in place and preserve subprocess output streams.
 
 ### Tiếng Việt
 
@@ -17,3 +19,5 @@
 - Chuyển thể menu CNR, chữ nổi màu cam và bộ vẽ cập nhật từng vùng. Bổ sung trình nhập song ngữ, gợi ý lệnh và kết quả trực tiếp có giới hạn.
 - Tìm workspace từ đường dẫn executable và thêm `--desktop interface` để mở giao diện sau khi kiểm chứng native hoặc Vite.
 - Thêm tham chiếu lệnh CNL và Cargo bằng tiếng Anh và tiếng Việt.
+- Chạy tiến trình build và kiểm chứng trong thư mục phù hợp. Gắn lựa chọn ứng viên với workspace và hồ sơ.
+- Xóa nội dung nhập tạm khi đổi lệnh, đổi ngôn ngữ ngay trong TUI và giữ riêng các luồng đầu ra.

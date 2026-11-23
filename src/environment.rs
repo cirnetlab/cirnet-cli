@@ -1,7 +1,9 @@
 use std::{
     env, fs,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -48,6 +50,7 @@ impl Profile {
 
 pub struct State {
     pub dir: PathBuf,
+    pub name: String,
     pub profile: Profile,
 }
 
@@ -103,6 +106,7 @@ impl State {
         {
             bail!("State and artifacts must be outside repository and Git directories");
         }
+        let profile_name = profile.to_owned();
         let dir = resolved.join(profile);
         if let Ok(info) = fs::symlink_metadata(&dir)
             && (!info.is_dir() || canonical(&dir)? != dir)
@@ -115,7 +119,11 @@ impl State {
         } else {
             Profile::default()
         };
-        let state = Self { dir, profile };
+        let state = Self {
+            dir,
+            name: profile_name,
+            profile,
+        };
         state.profile.validate()?;
         Ok(state)
     }
@@ -153,10 +161,20 @@ fn contains_ignoring_case(parent: &Path, child: &Path) -> bool {
 }
 
 pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
-    let temporary = path.with_extension("json.new");
-    fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
-    fs::rename(temporary, path)?;
-    Ok(())
+    let bytes = serde_json::to_vec_pretty(value)?;
+    let moment = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let temporary = path.with_extension(format!("json.{}-{moment}.new", std::process::id()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let written = file.write_all(&bytes).and_then(|()| file.sync_all());
+    drop(file);
+    let result = written.and_then(|()| fs::rename(&temporary, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    Ok(result?)
 }
 
 pub fn doctor(workspace: &Workspace) -> Value {

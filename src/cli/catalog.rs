@@ -8,7 +8,7 @@ pub(crate) struct Entry {
     pub label: Localized,
     pub detail: Localized,
     pub command: &'static str,
-    pub prompt: bool,
+    pub recommendation: Option<&'static str>,
 }
 
 pub(crate) const ENTRIES: &[Entry] = &[
@@ -19,7 +19,7 @@ pub(crate) const ENTRIES: &[Entry] = &[
             "Kiểm tra toolchain và các điều kiện để chạy hệ thống.",
         ],
         command: "doctor",
-        prompt: false,
+        recommendation: None,
     },
     Entry {
         label: ["Environment", "Môi trường"],
@@ -27,8 +27,8 @@ pub(crate) const ENTRIES: &[Entry] = &[
             "Review the selected profile and its local ports.",
             "Xem hồ sơ đang chọn và các cổng cục bộ.",
         ],
-        command: "env show",
-        prompt: false,
+        command: "env",
+        recommendation: Some("show"),
     },
     Entry {
         label: ["Development setup", "Thiết lập phát triển"],
@@ -37,7 +37,7 @@ pub(crate) const ENTRIES: &[Entry] = &[
             "Chuẩn bị hồ sơ phát triển và Chromium nếu cần.",
         ],
         command: "setup",
-        prompt: true,
+        recommendation: Some("--browser"),
     },
     Entry {
         label: ["Repositories", "Kho mã nguồn"],
@@ -45,8 +45,8 @@ pub(crate) const ENTRIES: &[Entry] = &[
             "Discover and inspect the independent CIRNETLAB repositories.",
             "Tìm và kiểm tra các kho mã nguồn CIRNETLAB.",
         ],
-        command: "repos status",
-        prompt: false,
+        command: "repos",
+        recommendation: Some("status"),
     },
     Entry {
         label: ["Build", "Bản dựng"],
@@ -54,8 +54,8 @@ pub(crate) const ENTRIES: &[Entry] = &[
             "Build the full native stack or selected components in dependency order.",
             "Build hệ thống native hoặc thành phần đã chọn theo thứ tự phụ thuộc.",
         ],
-        command: "build --all",
-        prompt: true,
+        command: "build",
+        recommendation: Some("--all"),
     },
     Entry {
         label: ["Run Interface", "Chạy Interface"],
@@ -63,8 +63,8 @@ pub(crate) const ENTRIES: &[Entry] = &[
             "Start the native stack and open the packaged Interface after readiness.",
             "Khởi động hệ thống native và mở Interface đóng gói khi sẵn sàng.",
         ],
-        command: "run --desktop interface",
-        prompt: true,
+        command: "run",
+        recommendation: Some("--desktop interface"),
     },
     Entry {
         label: ["Develop Interface", "Phát triển Interface"],
@@ -72,8 +72,8 @@ pub(crate) const ENTRIES: &[Entry] = &[
             "Start native services and serve live Interface sources with Vite.",
             "Khởi động dịch vụ native và phục vụ mã Interface qua Vite.",
         ],
-        command: "dev --desktop interface",
-        prompt: true,
+        command: "dev",
+        recommendation: Some("--desktop interface"),
     },
     Entry {
         label: ["Runtime status", "Trạng thái hệ thống"],
@@ -82,7 +82,7 @@ pub(crate) const ENTRIES: &[Entry] = &[
             "Hiển thị dịch vụ thuộc CLI, tình trạng, cổng và URL Interface.",
         ],
         command: "status",
-        prompt: false,
+        recommendation: None,
     },
     Entry {
         label: ["Verification", "Kiểm chứng"],
@@ -91,7 +91,7 @@ pub(crate) const ENTRIES: &[Entry] = &[
             "Kiểm chứng ứng viên hoặc các thành phần đã chọn.",
         ],
         command: "verify",
-        prompt: true,
+        recommendation: None,
     },
     Entry {
         label: ["Stop", "Dừng"],
@@ -100,7 +100,7 @@ pub(crate) const ENTRIES: &[Entry] = &[
             "Yêu cầu bộ giám sát dừng ứng dụng do CLI quản lý.",
         ],
         command: "stop",
-        prompt: true,
+        recommendation: None,
     },
     Entry {
         label: ["Command reference", "Tham chiếu lệnh"],
@@ -109,13 +109,13 @@ pub(crate) const ENTRIES: &[Entry] = &[
             "Hiển thị cú pháp lệnh và các tùy chọn.",
         ],
         command: "--help",
-        prompt: false,
+        recommendation: None,
     },
     Entry {
         label: ["Exit", "Thoát"],
         detail: ["Close the terminal menu.", "Đóng menu terminal."],
         command: "",
-        prompt: false,
+        recommendation: None,
     },
 ];
 

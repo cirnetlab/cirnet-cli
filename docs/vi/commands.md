@@ -33,7 +33,7 @@ Các ví dụ bên dưới dùng `cnl`. Nếu CLI chưa có trong PATH, dùng `&
 | `--workspace <DIR>` | Chọn thư mục cha của các checkout. Tham số này ưu tiên hơn `CNL_WORKSPACE`. Khi cả hai chưa đặt, CLI tìm từ các thư mục cha của thư mục hiện hành, rồi đến các thư mục cha của executable. |
 | `--state-dir <ABSOLUTE_DIR>` | Chọn thư mục tuyệt đối bên ngoài Git checkout để lưu hồ sơ, cơ sở dữ liệu SQLite cục bộ và bản dựng. Mặc định mỗi workspace có thư mục riêng dưới `%LOCALAPPDATA%\CIRNETLAB`. |
 | `--profile <NAME>` | Chọn hồ sơ. Mặc định là `windows-x64`. Tên có thể chứa chữ, số, dấu gạch ngang hoặc gạch dưới. Dùng cùng workspace, thư mục trạng thái và hồ sơ trong suốt một vòng chạy. |
-| `--json` | Xuất báo cáo có cấu trúc ra stdout để tự động hóa. |
+| `--json` | Ghi báo cáo có cấu trúc ra stdout. Chế độ này ẩn tiến độ trên stdout của tiến trình con. Thông báo chẩn đoán vẫn đi qua stderr. |
 | `--lang en\|vi` | Chọn ngôn ngữ terminal tương tác. Mặc định là `en`. |
 | `-h`, `--help` | Hiện trợ giúp cho lệnh đã chọn. |
 | `-V`, `--version` | Xem phiên bản CLI ở cấp lệnh chính. |
@@ -97,7 +97,7 @@ cnl setup --browser
 cnl verify
 ```
 
-Dùng `--initialize-db` ở lần chạy đầu tiên của mỗi hồ sơ mới. Nếu CLI chưa tìm thấy ứng viên, chạy `cnl build --all` với cùng hồ sơ hoặc truyền `--receipt`. Nếu đường dẫn bản dựng trên Windows quá dài, chọn thư mục ngắn bên ngoài repo bằng `--state-dir`.
+Dùng `--initialize-db` ở lần chạy đầu tiên của mỗi hồ sơ mới. `build --all` chỉ cập nhật receipt đã chọn sau khi kiểm chứng ứng viên mới. Thông tin lựa chọn lưu workspace, thư mục trạng thái, hồ sơ và mã băm manifest. Trường `receipt` trong báo cáo bản dựng là đường dẫn truyền vào `--receipt`. Cờ này chọn ứng viên cho lần gọi hiện tại và giữ nguyên lựa chọn đã lưu. Nếu receipt thiếu hoặc không hợp lệ, build lại trong cùng phạm vi hoặc chọn receipt đã kiểm chứng khác. Nếu đường dẫn bản dựng trên Windows quá dài, chọn thư mục ngắn bên ngoài repo bằng `--state-dir`.
 
 Ví dụ xem trước và kiểm tra theo phạm vi
 

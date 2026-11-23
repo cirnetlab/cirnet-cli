@@ -1,4 +1,3 @@
-// Derived from CIRNET Rules CNR, commit 646afa38516bbfd276b0aecb7a138ab427df5fa9 (GPL-3.0).
 use std::fmt;
 
 pub(super) const MAX_BYTES: usize = 256 * 1024;

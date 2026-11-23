@@ -1,4 +1,3 @@
-// Derived from CIRNET Rules CNR, commit 646afa38516bbfd276b0aecb7a138ab427df5fa9 (GPL-3.0).
 use std::{
     io::{self, Read},
     path::PathBuf,
@@ -16,6 +15,10 @@ use crate::{process::hidden, workspace::Workspace};
 
 const STREAM_LIMIT: usize = 128 * 1024;
 const LOG_FRAME_INTERVAL: Duration = Duration::from_millis(160);
+pub(super) const CANNOT_CANCEL: super::Localized = [
+    "Wait for this command to finish. Use stop for the application.",
+    "Đợi lệnh hoàn tất. Dùng stop để dừng ứng dụng.",
+];
 
 pub(super) enum Outcome {
     Pass,
@@ -92,6 +95,7 @@ impl Runner {
         workspace: &Workspace,
         flags: &ArgMatches,
         args: &[String],
+        vi: bool,
     ) -> Result<Self> {
         let parsed = crate::cli::app()
             .try_get_matches_from(std::iter::once("cnl").chain(args.iter().map(String::as_str)));
@@ -100,17 +104,24 @@ impl Runner {
             bail!("The CIRNETLAB terminal is already open.");
         }
         let mut command = Command::new(std::env::current_exe()?);
-        command
-            .arg("--workspace")
-            .arg(&workspace.root)
-            .arg("--profile")
-            .arg(flags.get_one::<String>("profile").expect("default profile"));
-        if let Some(path) = flags.get_one::<PathBuf>("state-dir") {
+        let supplied = |name: &str| {
+            parsed.as_ref().is_ok_and(|matches| {
+                matches.value_source(name) == Some(clap::parser::ValueSource::CommandLine)
+            })
+        };
+        if !supplied("workspace") {
+            command.arg("--workspace").arg(&workspace.root);
+        }
+        if !supplied("profile") {
+            command
+                .arg("--profile")
+                .arg(flags.get_one::<String>("profile").expect("default profile"));
+        }
+        if !supplied("state-dir")
+            && let Some(path) = flags.get_one::<PathBuf>("state-dir")
+        {
             command.arg("--state-dir").arg(path);
         }
-        let vi = flags
-            .get_one::<String>("lang")
-            .is_some_and(|language| language == "vi");
         command.args(args).env("NO_COLOR", "1");
         Self::spawn(command, !matches!(action, Some("run" | "dev" | "stop")), vi)
     }
@@ -181,6 +192,13 @@ impl Runner {
         })
     }
 
+    pub(super) fn set_language(&mut self, vi: bool) {
+        if self.vi != vi {
+            self.vi = vi;
+            self.capture.lock().expect("output capture").dirty = true;
+        }
+    }
+
     pub(super) fn poll(&mut self) -> io::Result<Update> {
         if self.exit.is_none() {
             self.exit = self.child.try_wait()?;
@@ -233,13 +251,7 @@ impl Runner {
             return Ok(());
         }
         let Some(job) = self.job.take() else {
-            return Err(super::text(
-                [
-                    "Wait for this command to finish. Use stop for the application.",
-                    "Đợi lệnh hoàn tất. Dùng stop để dừng ứng dụng.",
-                ],
-                self.vi,
-            ));
+            return Err(super::text(CANNOT_CANCEL, self.vi));
         };
         self.cancelled = true;
         drop(job);

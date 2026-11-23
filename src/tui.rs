@@ -1,4 +1,3 @@
-// Derived from CIRNET Rules CNR, commit 646afa38516bbfd276b0aecb7a138ab427df5fa9 (GPL-3.0).
 mod banner;
 mod clipboard;
 mod completion;
@@ -202,7 +201,6 @@ struct Menu {
     first: usize,
     search: Option<Input>,
     prompt: Option<Prompt>,
-    draft: Input,
     help: bool,
     output: Option<OutputView>,
     history: Vec<String>,
@@ -222,7 +220,6 @@ impl Menu {
             first: 0,
             search: None,
             prompt: None,
-            draft: Input::default(),
             help: false,
             output: None,
             history: Vec::new(),
@@ -289,22 +286,9 @@ impl Menu {
         if entry.command.is_empty() {
             return Effect::Exit;
         }
-        if entry.prompt {
-            let draft = if self.draft.value.is_empty() {
-                Input::at_end(entry.command.to_owned())
-            } else {
-                std::mem::take(&mut self.draft)
-            };
-            self.open_prompt(draft);
-            return Effect::Redraw;
-        }
-        Effect::Run(
-            entry
-                .command
-                .split_ascii_whitespace()
-                .map(str::to_owned)
-                .collect(),
-        )
+        let input = Input::at_end(format!("{} ", entry.command));
+        self.open_prompt(input);
+        Effect::Redraw
     }
 
     fn open_prompt(&mut self, input: Input) {
@@ -315,27 +299,47 @@ impl Menu {
         });
         self.help = false;
         self.history_index = None;
+        self.history_draft = Input::default();
     }
 
     fn begin_output(&mut self, args: &[String]) {
         self.interaction.reset_output();
         self.output = Some(OutputView::new(output_title(args), self.vi));
-        let draft = std::mem::take(&mut self.draft);
-        self.open_prompt(draft);
+        self.open_prompt(Input::default());
     }
 
     fn close_main_prompt(&mut self) -> bool {
-        let Some(prompt) = self.prompt.take() else {
-            return false;
-        };
-        self.draft = if self.history_index.is_some() {
-            std::mem::take(&mut self.history_draft)
-        } else {
-            prompt.input
-        };
+        let closed = self.prompt.take().is_some();
         self.history_index = None;
         self.history_draft = Input::default();
-        true
+        closed
+    }
+
+    fn switch_language(&mut self, vi: bool) {
+        let selected = self.items.get(self.selected).copied();
+        if let Some(output) = &mut self.output {
+            for status in [
+                ["Running…", "Đang chạy…"],
+                ["Cancelling…", "Đang hủy…"],
+                runner::CANNOT_CANCEL,
+            ] {
+                if output.status == text(status, self.vi) {
+                    output.status = text(status, vi).into();
+                    break;
+                }
+            }
+        }
+        self.vi = vi;
+        self.completer = Completer::new(vi);
+        self.refilter();
+        if let Some(index) = self
+            .items
+            .iter()
+            .position(|entry| selected.is_some_and(|selected| std::ptr::eq(*entry, selected)))
+        {
+            self.selected = index;
+        }
+        self.open_prompt(Input::default());
     }
 
     fn refresh_suggestions(&mut self) {
@@ -363,6 +367,33 @@ impl Menu {
         } else {
             self.completer.suggestions(&input.value, input.cursor)
         };
+        if self.output.is_none()
+            && input.cursor == input.value.len()
+            && let Some(entry) = self.items.get(self.selected)
+            && input.value.trim_end() == entry.command
+            && let Some(recommendation) = entry.recommendation
+        {
+            let separator = if input.value.ends_with(char::is_whitespace) {
+                ""
+            } else {
+                " "
+            };
+            prompt
+                .completions
+                .retain(|item| item.text != recommendation);
+            prompt.completions.insert(
+                0,
+                Suggestion {
+                    text: format!("{separator}{recommendation}"),
+                    insert_range: input.cursor..input.cursor,
+                    label: recommendation.into(),
+                    kind: Kind::Option,
+                    description: text(["Recommended action", "Thao tác gợi ý"], self.vi).into(),
+                    source: Source::Menu,
+                },
+            );
+            prompt.completions.truncate(SUGGESTION_LIMIT);
+        }
         if input.cursor == input.value.len()
             && !input.value.is_empty()
             && !input.value.contains("-- ")
@@ -491,6 +522,14 @@ impl Menu {
         if args.first().is_some_and(|word| word == "cnl") {
             args.remove(0);
         }
+        if let Some(vi) = crate::cli::local_terminal_language(&args) {
+            self.switch_language(vi);
+            return Effect::Redraw;
+        }
+        if self.output.as_ref().is_some_and(|output| output.running) {
+            prompt.error = Some(["A command is still running.", "Một lệnh đang chạy."]);
+            return Effect::Redraw;
+        }
         if args.len() == 1 && args[0] == "clear" {
             if let Some(output) = &mut self.output {
                 output.buffer = Buffer::default();
@@ -516,17 +555,13 @@ impl Menu {
         }
         self.history_index = None;
         self.history_draft = Input::default();
-        self.draft = Input::default();
         self.prompt = None;
         Effect::Run(args)
     }
 
     fn edit_prompt(&mut self, key: KeyEvent) -> Effect {
         match key.code {
-            KeyCode::Enter
-                if text_modifiers(key)
-                    && self.output.as_ref().is_none_or(|output| !output.running) =>
-            {
+            KeyCode::Enter if text_modifiers(key) => {
                 return self.submit_prompt();
             }
             KeyCode::Tab | KeyCode::BackTab if text_modifiers(key) => {
@@ -683,8 +718,7 @@ impl Menu {
             return Effect::Redraw;
         }
         if control(key, 'r') && !self.history.is_empty() {
-            let draft = std::mem::take(&mut self.draft);
-            self.open_prompt(draft);
+            self.open_prompt(Input::default());
             self.history_move(true, true);
             return Effect::Redraw;
         }
@@ -712,13 +746,11 @@ impl Menu {
                 Effect::Redraw
             }
             Some(':') => {
-                let draft = std::mem::take(&mut self.draft);
-                self.open_prompt(draft);
+                self.open_prompt(Input::default());
                 Effect::Redraw
             }
             Some(ch) if !ch.is_whitespace() && !self.help => {
-                let draft = std::mem::take(&mut self.draft);
-                self.open_prompt(draft);
+                self.open_prompt(Input::default());
                 self.edit_prompt(key)
             }
             _ => Effect::Idle,
@@ -738,8 +770,7 @@ impl Menu {
             if self.help || value.trim().is_empty() {
                 return Effect::Idle;
             }
-            let draft = std::mem::take(&mut self.draft);
-            self.open_prompt(draft);
+            self.open_prompt(Input::default());
         }
         self.paste_editor(value)
     }
@@ -911,6 +942,7 @@ fn show(
     let mut clipboard = SystemClipboard;
     loop {
         if let Some(worker) = &mut running {
+            worker.set_language(menu.vi);
             let update = worker.poll()?;
             if let Some(output) = &mut menu.output {
                 if let Some(buffer) = update.buffer {
@@ -994,7 +1026,7 @@ fn show(
                 }
                 Effect::Run(args) => {
                     menu.begin_output(&args);
-                    match runner::Runner::start(workspace, flags, &args) {
+                    match runner::Runner::start(workspace, flags, &args, menu.vi) {
                         Ok(worker) => {
                             menu.output.as_mut().expect("output was created").follow = true;
                             running = Some(worker);
@@ -1023,4 +1055,98 @@ pub fn open(workspace: &Workspace, flags: &ArgMatches) -> anyhow::Result<()> {
     let mut menu = Menu::new(vi);
     show(&mut menu, terminal::color_enabled(), true, workspace, flags)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn choose(menu: &mut Menu, command: &str) {
+        let index = menu
+            .items
+            .iter()
+            .position(|entry| entry.command == command)
+            .unwrap();
+        menu.select(index);
+        assert!(matches!(menu.activate(), Effect::Redraw));
+    }
+
+    #[test]
+    fn menu_commands_open_fresh_base_prompts_and_offer_valid_actions() {
+        let mut menu = Menu::new(false);
+        for entry in ENTRIES.iter().filter(|entry| !entry.command.is_empty()) {
+            choose(&mut menu, entry.command);
+            assert_eq!(
+                menu.prompt.as_ref().unwrap().input.value,
+                format!("{} ", entry.command)
+            );
+            menu.refresh_suggestions();
+            let prompt = menu.prompt.as_ref().unwrap();
+            if let Some(action) = entry.recommendation {
+                assert_eq!(prompt.completions.first().unwrap().text, action);
+                let command = format!("{}{action}", prompt.input.value);
+                assert!(
+                    crate::cli::app()
+                        .try_get_matches_from(
+                            std::iter::once("cnl").chain(command.split_ascii_whitespace())
+                        )
+                        .is_ok(),
+                    "{command}"
+                );
+            }
+            menu.handle(key(KeyCode::Char('x')));
+            menu.handle(key(KeyCode::Esc));
+        }
+    }
+
+    #[test]
+    fn output_navigation_clears_abandoned_input_without_losing_history() {
+        let mut menu = Menu::new(false);
+        menu.open_prompt(Input::at_end("status".into()));
+        assert!(matches!(menu.submit_prompt(), Effect::Run(_)));
+        menu.begin_output(&["status".into()]);
+        menu.output.as_mut().unwrap().running = false;
+        menu.open_prompt(Input::at_end("build --of".into()));
+        assert!(matches!(menu.handle(key(KeyCode::PageUp)), Effect::Idle));
+        assert_eq!(menu.prompt.as_ref().unwrap().input.value, "build --of");
+        menu.handle(key(KeyCode::Esc));
+        assert!(menu.output.is_none());
+        choose(&mut menu, "run");
+        assert_eq!(menu.prompt.as_ref().unwrap().input.value, "run ");
+        menu.handle(key(KeyCode::Up));
+        assert_eq!(menu.prompt.as_ref().unwrap().input.value, "status");
+        menu.handle(key(KeyCode::Down));
+        assert_eq!(menu.prompt.as_ref().unwrap().input.value, "run ");
+    }
+
+    #[test]
+    fn language_switch_is_local_and_keeps_active_output_and_history() {
+        let mut menu = Menu::new(false);
+        menu.history.push("status".into());
+        menu.begin_output(&["build".into(), "--all".into()]);
+        menu.output.as_mut().unwrap().buffer =
+            Buffer::from_streams("native work in flight".into(), "", None);
+        for (command, vi) in [("cnl --lang vi", true), ("cnl tui --lang=en", false)] {
+            menu.open_prompt(Input::at_end(command.into()));
+            assert!(matches!(menu.handle(key(KeyCode::Enter)), Effect::Redraw));
+            assert_eq!(menu.vi, vi);
+            assert_eq!(menu.history, ["status"]);
+            let output = menu.output.as_mut().unwrap();
+            assert!(output.running);
+            assert_eq!(output.status, text(["Running…", "Đang chạy…"], vi));
+            assert!(
+                output
+                    .buffer
+                    .find("native work in flight", None, false)
+                    .is_some()
+            );
+        }
+        menu.open_prompt(Input::at_end("status".into()));
+        assert!(matches!(menu.submit_prompt(), Effect::Redraw));
+        assert!(menu.output.as_ref().unwrap().running);
+    }
 }

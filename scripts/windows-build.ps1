@@ -17,7 +17,12 @@ if ($env:VSCMD_ARG_TGT_ARCH -ne 'x64') {
     & (Join-Path $vs 'Common7/Tools/Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 }
 if ($PSCmdlet.ParameterSetName -eq 'System') {
-    & (Join-Path $Remote 'scripts/build-native-windows.ps1') -Selection $Selection -OutputParent $OutputParent -Offline:$Offline
+    Push-Location -LiteralPath $Remote
+    try {
+        & (Join-Path $Remote 'scripts/build-native-windows.ps1') -Selection $Selection -OutputParent $OutputParent -Offline:$Offline
+    } finally {
+        Pop-Location
+    }
 } else {
     Push-Location -LiteralPath $Component
     try {

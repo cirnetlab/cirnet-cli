@@ -168,6 +168,7 @@ pub fn app() -> Command {
 
 pub fn run() -> Result<()> {
     let matches = app().get_matches();
+    crate::process::set_json_output(matches.get_flag("json"));
     let workspace = Workspace::discover(
         matches
             .get_one::<PathBuf>("workspace")
@@ -251,6 +252,27 @@ pub fn run() -> Result<()> {
         _ => unreachable!(),
     };
     display(report, matches.get_flag("json"))
+}
+
+pub(crate) fn local_terminal_language(args: &[String]) -> Option<bool> {
+    if !args
+        .iter()
+        .any(|arg| arg == "--lang" || arg.starts_with("--lang="))
+    {
+        return None;
+    }
+    let matches = app()
+        .try_get_matches_from(std::iter::once("cnl").chain(args.iter().map(String::as_str)))
+        .ok()?;
+    if !matches!(matches.subcommand_name(), None | Some("tui"))
+        || matches.get_flag("json")
+        || ["workspace", "state-dir", "profile"]
+            .iter()
+            .any(|id| matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine))
+    {
+        return None;
+    }
+    matches.get_one::<String>("lang").map(|lang| lang == "vi")
 }
 
 fn repo_command(workspace: &Workspace, args: &ArgMatches) -> Result<Value> {
