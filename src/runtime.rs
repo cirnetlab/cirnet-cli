@@ -64,11 +64,12 @@ pub fn verify_ports(ports: &[u16]) -> Result<()> {
 
 pub fn start(workspace: &Workspace, state: &State, args: &ArgMatches, dev: bool) -> Result<Value> {
     let profile = &state.profile;
+    let open_browser = args.get_flag("open") || args.get_one::<String>("desktop").is_some();
     if args.get_flag("dry-run") {
         return Ok(
             json!({"dryRun":true, "mode":if dev {"dev"} else {"native"},"ports":profile,
             "dataDirectory":state.dir.join("data"),"initializeDb":args.get_flag("initialize-db"),
-            "receipt":args.get_one::<PathBuf>("receipt")}),
+            "receipt":args.get_one::<PathBuf>("receipt"),"openBrowser":open_browser}),
         );
     }
     if !cfg!(all(windows, target_arch = "x86_64")) {
@@ -157,7 +158,9 @@ pub fn start(workspace: &Workspace, state: &State, args: &ArgMatches, dev: bool)
         write_json(&record, &instance)?;
         let backend = probe(&instance, false)?;
         if backend["healthy"] != true {
-            bail!("Native application failed HTTP, Interface or Hardware RPC readiness: {backend}");
+            bail!(
+                "Native application failed HTTP, WebSocket, Interface or Hardware RPC readiness: {backend}"
+            );
         }
         if let Some(web) = web {
             let script = instance.log_dir.join("vite.mjs");
@@ -184,7 +187,7 @@ pub fn start(workspace: &Workspace, state: &State, args: &ArgMatches, dev: bool)
                 &format!("CIRNET_VITE_READY=http://127.0.0.1:{}", profile.dev_port),
             )?;
             if probe(&instance, true)?["healthy"] != true {
-                bail!("Vite frontend or proxied API is unhealthy");
+                bail!("Vite frontend, proxied API or proxied WebSocket is unhealthy");
             }
         }
         Ok(backend)
@@ -205,7 +208,7 @@ pub fn start(workspace: &Workspace, state: &State, args: &ArgMatches, dev: bool)
         }
     };
     let url = url(&instance);
-    if args.get_flag("open") {
+    if open_browser {
         let mut command = Command::new("rundll32.exe");
         hidden(
             command

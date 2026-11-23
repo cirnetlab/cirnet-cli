@@ -115,22 +115,32 @@ pub fn canonical(path: &Path) -> Result<PathBuf> {
 
 impl Workspace {
     pub fn discover(root: Option<&Path>) -> Result<Self> {
-        let start = canonical(&env::current_dir()?)?;
         if let Some(root) = root {
             return Ok(Self {
                 root: canonical(root)?,
             });
         }
-        for ancestor in start.ancestors() {
-            if ancestor.join(Repo::Remote.name()).is_dir()
-                || ancestor.join(Repo::Cli.name()).join(".git").exists()
+        if let Some(root) = env::var_os("CNL_WORKSPACE").filter(|value| !value.is_empty()) {
+            return Self::discover(Some(Path::new(&root)));
+        }
+        for origin in [env::current_dir(), env::current_exe()]
+            .into_iter()
+            .flatten()
+        {
+            if let Ok(path) = canonical(&origin)
+                && let Some(root) = path.ancestors().find(|ancestor| {
+                    ancestor.join(Repo::Remote.name()).is_dir()
+                        || ancestor.join(Repo::Cli.name()).join(".git").exists()
+                })
             {
                 return Ok(Self {
-                    root: ancestor.to_owned(),
+                    root: root.to_owned(),
                 });
             }
         }
-        bail!("Could not find the CIRNETLAB workspace. Set --workspace <directory>.")
+        bail!(
+            "Could not find the CIRNETLAB workspace. Set --workspace <directory> or CNL_WORKSPACE."
+        )
     }
 
     pub fn path(&self, repo: Repo) -> PathBuf {

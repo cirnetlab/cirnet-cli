@@ -1,437 +1,1026 @@
-use std::{
-    collections::VecDeque,
-    io::{self, IsTerminal, Read, Write},
-    path::PathBuf,
-    process::{Child, Command, Stdio},
-    sync::mpsc::{self, Receiver, SyncSender},
-    thread,
-    time::Duration,
-};
+// Derived from CIRNET Rules CNR, commit 646afa38516bbfd276b0aecb7a138ab427df5fa9 (GPL-3.0).
+mod banner;
+mod clipboard;
+mod completion;
+mod editor;
+mod highlight;
+mod interaction;
+mod runner;
+mod terminal;
+mod view;
+mod viewport;
 
-use anyhow::{Result, bail};
+use self::{
+    banner::Banner,
+    clipboard::SystemClipboard,
+    completion::{Completer, Kind, Source, Suggestion},
+    editor::Input,
+    interaction::Interaction,
+    terminal::{Painter, Screen, Tone},
+    viewport::Buffer,
+};
+use crate::workspace::Workspace;
 use clap::ArgMatches;
 use crossterm::{
-    cursor::{Hide, MoveTo, Show},
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-    execute, queue,
-    style::{Color, Print, ResetColor, SetForegroundColor},
-    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    terminal as console,
 };
-use unicode_width::UnicodeWidthChar;
+use std::io::IsTerminal;
+use std::{
+    io,
+    ops::Range,
+    time::{Duration, Instant},
+};
 
-use crate::{process::hidden, workspace::Workspace};
+use crate::cli::catalog::{ENTRIES, Entry, Localized, text};
 
-const OUTPUT_LINES: usize = 600;
-const COMMANDS: &[&str] = &[
-    "doctor",
-    "env show",
-    "env check",
-    "setup --dry-run",
-    "repos discover",
-    "repos status",
-    "build --all --dry-run",
-    "build --all",
-    "run --dry-run",
-    "run --initialize-db --open",
-    "dev --initialize-db --open",
-    "status",
-    "verify",
-    "stop",
-    "help",
-];
-const BANNER: &[&str] = &[
-    "▄██████ ███████ ██████▄ ██▄  ██ ███████ ███████    ██     ▄████▄  ██████▄",
-    "██        ███   ██   ██ ██▀▄ ██ ██        ███      ██     ██  ██  ██   ██",
-    "██        ███   ████▀▀  ██ ████ ██▀▀▀▀    ███      ██     ██████  ██████▀",
-    "██▄▄▄▄▄ ▄▄███▄▄ ██ ▀█▄  ██  ███ ██▄▄▄▄▄   ███      ██▄▄▄▄ ██  ██  ██▄▄▄██",
-    " ▀▀▀▀▀▀ ▀▀▀▀▀▀▀ ▀▀   ▀▀ ▀▀   ▀▀ ▀▀▀▀▀▀▀   ▀▀▀      ▀▀▀▀▀▀ ▀▀  ▀▀  ▀▀▀▀▀▀",
+const COMMAND_LIMIT: usize = 8192;
+const SEARCH_LIMIT: usize = 256;
+const HISTORY_LIMIT: usize = 100;
+const SUGGESTION_LIMIT: usize = 7;
+const COMMAND_TOO_LONG: Localized = ["Command exceeds 8 KiB.", "Lệnh vượt quá 8 KiB."];
+const PASTE_NEWLINE_NOTICE: Localized = [
+    "Input received. Press Enter to run.",
+    "Đã nhận nội dung. Nhấn Enter để chạy.",
 ];
 
-struct Terminal;
-impl Terminal {
-    fn enter() -> Result<Self> {
-        terminal::enable_raw_mode()?;
-        let terminal = Self;
-        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
-        Ok(terminal)
-    }
+fn text_modifiers(key: KeyEvent) -> bool {
+    !key.modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
 }
-impl Drop for Terminal {
-    fn drop(&mut self) {
-        let _ = execute!(io::stdout(), Show, ResetColor, LeaveAlternateScreen);
-        let _ = terminal::disable_raw_mode();
+
+fn control(key: KeyEvent, ch: char) -> bool {
+    key.code == KeyCode::Char(ch) && key.modifiers == KeyModifiers::CONTROL
+}
+
+fn printable(key: KeyEvent) -> Option<char> {
+    match key.code {
+        KeyCode::Char(ch) if !ch.is_control() && text_modifiers(key) => Some(ch),
+        _ => None,
     }
 }
 
-struct Running {
-    child: Child,
-    messages: Receiver<String>,
-    job: Option<ProcessJob>,
+#[derive(Default)]
+struct Prompt {
+    input: Input,
+    error: Option<Localized>,
+    completions: Vec<Suggestion>,
+    edited: bool,
+    accepted: Option<(usize, Input)>,
 }
 
-pub fn open(workspace: &Workspace, flags: &ArgMatches) -> Result<()> {
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        bail!("cnl tui requires an interactive terminal");
+impl Prompt {
+    fn changed(&mut self) {
+        self.error = None;
+        self.edited = true;
+        self.accepted = None;
     }
-    let _screen = Terminal::enter()?;
-    let mut input = String::new();
-    let mut history = Vec::<String>::new();
-    let mut history_index = 0;
-    let mut output = VecDeque::new();
-    let mut scroll = 0;
-    let mut current: Option<Running> = None;
-    let mut dirty = true;
-    loop {
-        if let Some(running) = &mut current {
-            for message in running.messages.try_iter() {
-                push(&mut output, message);
-                dirty = true;
-            }
-            if let Some(status) = running.child.try_wait()? {
-                for message in running.messages.try_iter() {
-                    push(&mut output, message);
-                }
-                push(&mut output, format!("Exit status {status}"));
-                current = None;
-                dirty = true;
-            }
+}
+
+struct OutputView {
+    title: String,
+    buffer: Buffer,
+    scroll: usize,
+    last_page: usize,
+    page_size: usize,
+    width: usize,
+    follow: bool,
+    started_at: Instant,
+    running: bool,
+    status: String,
+    tone: Tone,
+    find: Option<Input>,
+    query: String,
+    hit: Option<Range<usize>>,
+}
+
+impl OutputView {
+    fn new(title: String, vi: bool) -> Self {
+        Self {
+            title,
+            buffer: Buffer::default(),
+            scroll: 0,
+            last_page: 0,
+            page_size: 0,
+            width: 0,
+            follow: false,
+            started_at: Instant::now(),
+            running: true,
+            status: text(["Running…", "Đang chạy…"], vi).into(),
+            tone: Tone::Accent,
+            find: None,
+            query: String::new(),
+            hit: None,
         }
-        if dirty {
-            draw(&input, &output, scroll, current.is_some())?;
-            dirty = false;
-        }
-        if !event::poll(Duration::from_millis(80))? {
-            continue;
-        }
-        let key = match event::read()? {
-            Event::Resize(..) => {
-                dirty = true;
-                continue;
-            }
-            Event::Key(key) if key.kind != KeyEventKind::Release => key,
-            _ => continue,
+    }
+
+    fn layout(&mut self, width: usize, height: usize) {
+        let anchor = self.buffer.row_start(self.scroll);
+        self.page_size = height;
+        self.width = width;
+        self.last_page = self.buffer.layout(width).saturating_sub(height.max(1));
+        self.scroll = if self.follow {
+            self.last_page
+        } else {
+            anchor
+                .map_or(self.scroll, |offset| self.buffer.row_at(offset))
+                .min(self.last_page)
         };
-        dirty = true;
+    }
+
+    fn scroll_to(&mut self, row: usize, follow: bool) -> Effect {
+        let row = row.min(self.last_page);
+        self.follow = follow && row == self.last_page;
+        if row == self.scroll {
+            return Effect::Idle;
+        }
+        self.scroll = row;
+        Effect::Redraw
+    }
+
+    fn scroll_by(&mut self, lines: isize) -> Effect {
+        self.scroll_to(self.scroll.saturating_add_signed(lines), lines > 0)
+    }
+
+    fn search(&mut self, backwards: bool) {
+        self.hit = self.buffer.find(&self.query, self.hit.as_ref(), backwards);
+        if let Some(hit) = &self.hit {
+            self.scroll_to(self.buffer.row_at(hit.start), false);
+        }
+    }
+
+    fn finish(&mut self, result: Result<runner::RunOutput, String>) {
+        self.running = false;
+        match result {
+            Ok(result) => {
+                self.completed_status(result.outcome, result.exit_code, result.elapsed_ms);
+            }
+            Err(error) => {
+                self.buffer =
+                    Buffer::from_streams(String::new(), &runner::sanitize(error.as_bytes()), None);
+                self.completed_status(
+                    runner::Outcome::Fail,
+                    None,
+                    self.started_at.elapsed().as_millis(),
+                );
+            }
+        }
+    }
+
+    fn completed_status(
+        &mut self,
+        outcome: runner::Outcome,
+        exit_code: Option<i32>,
+        elapsed_ms: u128,
+    ) {
+        let (symbol, tone) = match outcome {
+            runner::Outcome::Pass => ("✓", Tone::Success),
+            runner::Outcome::Fail => ("✗", Tone::Error),
+            _ => ("!", Tone::Warning),
+        };
+        let code = exit_code.map_or_else(|| "?".into(), |code| code.to_string());
+        self.tone = tone;
+        self.status = format!(
+            "{symbol} {} · Exit {code} · Duration {elapsed_ms} ms",
+            outcome.label()
+        );
+    }
+}
+
+enum Effect {
+    Idle,
+    Redraw,
+    Run(Vec<String>),
+    Cancel,
+    Exit,
+}
+
+struct Menu {
+    vi: bool,
+    items: Vec<&'static Entry>,
+    selected: usize,
+    first: usize,
+    search: Option<Input>,
+    prompt: Option<Prompt>,
+    draft: Input,
+    help: bool,
+    output: Option<OutputView>,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    history_draft: Input,
+    completer: Completer,
+    banner: Banner,
+    interaction: Interaction,
+}
+
+impl Menu {
+    fn new(vi: bool) -> Self {
+        Self {
+            vi,
+            items: ENTRIES.iter().collect(),
+            selected: 0,
+            first: 0,
+            search: None,
+            prompt: None,
+            draft: Input::default(),
+            help: false,
+            output: None,
+            history: Vec::new(),
+            history_index: None,
+            history_draft: Input::default(),
+            completer: Completer::new(vi),
+            banner: Banner::default(),
+            interaction: Interaction::default(),
+        }
+    }
+
+    fn refilter(&mut self) {
+        let query = self
+            .search
+            .as_ref()
+            .map_or_else(String::new, |input| input.value.to_lowercase());
+        self.items = ENTRIES
+            .iter()
+            .filter(|entry| {
+                text(entry.label, self.vi).to_lowercase().contains(&query)
+                    || text(entry.detail, self.vi).to_lowercase().contains(&query)
+                    || entry.command.contains(&query)
+                    || entry
+                        .command
+                        .split_whitespace()
+                        .next()
+                        .and_then(|name| completion::grammar().find_subcommand(name))
+                        .is_some_and(|command| {
+                            command
+                                .get_subcommands()
+                                .any(|child| child.get_name().contains(&query))
+                        })
+            })
+            .collect();
+        self.selected = 0;
+        self.first = 0;
+    }
+
+    fn reveal_selection(&mut self, visible: usize) {
+        self.first = self
+            .first
+            .min(self.items.len().saturating_sub(visible))
+            .clamp(
+                self.selected.saturating_sub(visible.saturating_sub(1)),
+                self.selected,
+            );
+    }
+
+    fn select(&mut self, index: usize) -> Effect {
+        let index = index.min(self.items.len().saturating_sub(1));
+        let effect = if index == self.selected {
+            Effect::Idle
+        } else {
+            Effect::Redraw
+        };
+        self.selected = index;
+        effect
+    }
+
+    fn activate(&mut self) -> Effect {
+        let Some(entry) = self.items.get(self.selected) else {
+            return Effect::Idle;
+        };
+        if entry.command.is_empty() {
+            return Effect::Exit;
+        }
+        if entry.prompt {
+            let draft = if self.draft.value.is_empty() {
+                Input::at_end(entry.command.to_owned())
+            } else {
+                std::mem::take(&mut self.draft)
+            };
+            self.open_prompt(draft);
+            return Effect::Redraw;
+        }
+        Effect::Run(
+            entry
+                .command
+                .split_ascii_whitespace()
+                .map(str::to_owned)
+                .collect(),
+        )
+    }
+
+    fn open_prompt(&mut self, input: Input) {
+        self.prompt = Some(Prompt {
+            input,
+            edited: true,
+            ..Prompt::default()
+        });
+        self.help = false;
+        self.history_index = None;
+    }
+
+    fn begin_output(&mut self, args: &[String]) {
+        self.interaction.reset_output();
+        self.output = Some(OutputView::new(output_title(args), self.vi));
+        let draft = std::mem::take(&mut self.draft);
+        self.open_prompt(draft);
+    }
+
+    fn close_main_prompt(&mut self) -> bool {
+        let Some(prompt) = self.prompt.take() else {
+            return false;
+        };
+        self.draft = if self.history_index.is_some() {
+            std::mem::take(&mut self.history_draft)
+        } else {
+            prompt.input
+        };
+        self.history_index = None;
+        self.history_draft = Input::default();
+        true
+    }
+
+    fn refresh_suggestions(&mut self) {
+        let Some(prompt) = self.prompt.as_mut().filter(|prompt| prompt.edited) else {
+            return;
+        };
+        prompt.edited = false;
+        let input = &prompt.input;
+        prompt.completions = if input.value.is_empty() {
+            self.output
+                .is_none()
+                .then(|| self.items.get(self.selected))
+                .flatten()
+                .filter(|entry| !entry.command.is_empty())
+                .map(|entry| Suggestion {
+                    text: entry.command.into(),
+                    insert_range: 0..0,
+                    label: entry.command.into(),
+                    kind: Kind::Command,
+                    description: text(entry.detail, self.vi).into(),
+                    source: Source::Menu,
+                })
+                .into_iter()
+                .collect()
+        } else {
+            self.completer.suggestions(&input.value, input.cursor)
+        };
+        if input.cursor == input.value.len()
+            && !input.value.is_empty()
+            && !input.value.contains("-- ")
+        {
+            // The completer only falls back to fuzzy matches if no exact prefix
+            // matches exist. Safe history takes precedence over those matches.
+            let fuzzy = if prompt.completions.iter().all(|item| {
+                !item
+                    .text
+                    .starts_with(&input.value[item.insert_range.start..input.cursor])
+            }) {
+                std::mem::take(&mut prompt.completions)
+            } else {
+                Vec::new()
+            };
+            for entry in self
+                .history
+                .iter()
+                .rev()
+                .filter(|entry| entry.starts_with(&input.value) && *entry != &input.value)
+            {
+                if prompt.completions.len() >= SUGGESTION_LIMIT {
+                    break;
+                }
+                if prompt.completions.iter().any(|suggestion| {
+                    let range = &suggestion.insert_range;
+                    entry.len() == input.value.len() - range.len() + suggestion.text.len()
+                        && entry.starts_with(&input.value[..range.start])
+                        && entry.ends_with(&input.value[range.end..])
+                        && entry[range.start..].starts_with(&suggestion.text)
+                }) {
+                    continue;
+                }
+                prompt.completions.push(Suggestion {
+                    text: entry.clone(),
+                    insert_range: 0..input.value.len(),
+                    label: entry.clone(),
+                    kind: Kind::History,
+                    description: text(["Recent command", "Lệnh gần đây"], self.vi).into(),
+                    source: Source::History,
+                });
+            }
+            for suggestion in fuzzy {
+                if prompt.completions.len() == SUGGESTION_LIMIT {
+                    break;
+                }
+                if !prompt.completions.iter().any(|existing| {
+                    existing.text == suggestion.text
+                        && existing.insert_range == suggestion.insert_range
+                }) {
+                    prompt.completions.push(suggestion);
+                }
+            }
+        }
+    }
+
+    fn complete(&mut self, backwards: bool) -> Effect {
+        self.refresh_suggestions();
+        let prompt = self.prompt.as_mut().expect("prompt is active");
+        let count = prompt.completions.len();
+        if count == 0 || prompt.error == Some(COMMAND_TOO_LONG) {
+            return Effect::Idle;
+        }
+        let (index, base) = prompt.accepted.take().map_or_else(
+            || (if backwards { count - 1 } else { 0 }, prompt.input.clone()),
+            |(index, base)| {
+                (
+                    (index + if backwards { count - 1 } else { 1 }) % count,
+                    base,
+                )
+            },
+        );
+        let completion = &prompt.completions[index];
+        let range = completion.insert_range.clone();
+        if !prompt
+            .input
+            .replace_from(&base, range, &completion.text, COMMAND_LIMIT)
+        {
+            return Effect::Idle;
+        }
+        prompt.accepted = Some((index, base));
+        prompt.error = None;
+        self.history_index = None;
+        Effect::Redraw
+    }
+
+    fn history_move(&mut self, older: bool, prefix: bool) -> Effect {
+        if self.history.is_empty() || (!older && self.history_index.is_none()) {
+            return Effect::Idle;
+        }
+        let prompt = self.prompt.as_mut().expect("prompt is active");
+        if self.history_index.is_none() {
+            self.history_draft.clone_from(&prompt.input);
+        }
+        self.history_index = if older {
+            let before = self.history_index.unwrap_or(self.history.len());
+            let matches = |entry: &String| !prefix || entry.starts_with(&self.history_draft.value);
+            let Some(index) = self.history[..before].iter().rposition(matches) else {
+                return Effect::Idle;
+            };
+            Some(index)
+        } else {
+            self.history_index
+                .and_then(|index| (index + 1 < self.history.len()).then_some(index + 1))
+        };
+        prompt.input = self.history_index.map_or_else(
+            || self.history_draft.clone(),
+            |index| Input::at_end(self.history[index].clone()),
+        );
+        prompt.changed();
+        Effect::Redraw
+    }
+
+    fn submit_prompt(&mut self) -> Effect {
+        let prompt = self.prompt.as_mut().expect("prompt is active");
+        if prompt.input.value.trim().is_empty() || prompt.error == Some(COMMAND_TOO_LONG) {
+            return Effect::Idle;
+        }
+        let Ok(mut args) = completion::arguments(&prompt.input.value) else {
+            prompt.error = Some([
+                "Close the quoted argument.",
+                "Hãy đóng dấu nháy của đối số.",
+            ]);
+            return Effect::Redraw;
+        };
+        if args.first().is_some_and(|word| word == "cnl") {
+            args.remove(0);
+        }
+        if args.len() == 1 && args[0] == "clear" {
+            if let Some(output) = &mut self.output {
+                output.buffer = Buffer::default();
+                output.scroll = 0;
+                output.follow = false;
+                output.hit = None;
+            }
+            self.open_prompt(Input::default());
+            return Effect::Redraw;
+        }
+        if args.is_empty() || args[0] == "tui" {
+            prompt.error = Some(["Enter a CIRNETLAB command.", "Nhập một lệnh CIRNETLAB."]);
+            return Effect::Redraw;
+        }
+        if safe_history(&args) {
+            let command = prompt.input.value.trim().to_owned();
+            if self.history.last() != Some(&command) {
+                self.history.push(command);
+                if self.history.len() > HISTORY_LIMIT {
+                    self.history.remove(0);
+                }
+            }
+        }
+        self.history_index = None;
+        self.history_draft = Input::default();
+        self.draft = Input::default();
+        self.prompt = None;
+        Effect::Run(args)
+    }
+
+    fn edit_prompt(&mut self, key: KeyEvent) -> Effect {
         match key.code {
-            KeyCode::Esc | KeyCode::Char('c')
-                if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) =>
+            KeyCode::Enter
+                if text_modifiers(key)
+                    && self.output.as_ref().is_none_or(|output| !output.running) =>
             {
-                if let Some(running) = &mut current {
-                    if let Some(job) = running.job.take() {
-                        drop(job);
-                        push(&mut output, "Cancellation requested".into());
-                    } else {
-                        push(
-                            &mut output,
-                            "Wait for this command to finish. Use stop for a running application."
-                                .into(),
-                        );
-                    }
-                } else if input.is_empty() {
-                    return Ok(());
-                } else {
-                    input.clear();
-                }
+                return self.submit_prompt();
             }
-            KeyCode::PageUp => scroll = (scroll + 8).min(output.len().saturating_sub(1)),
-            KeyCode::PageDown => scroll = scroll.saturating_sub(8),
-            KeyCode::Up if history_index > 0 => {
-                history_index -= 1;
-                input.clone_from(&history[history_index]);
+            KeyCode::Tab | KeyCode::BackTab if text_modifiers(key) => {
+                return self.complete(
+                    key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT),
+                );
             }
-            KeyCode::Down if history_index < history.len() => {
-                history_index += 1;
-                input = history.get(history_index).cloned().unwrap_or_default();
+            KeyCode::Up | KeyCode::Down if text_modifiers(key) => {
+                return self.history_move(key.code == KeyCode::Up, false);
             }
-            KeyCode::Tab => {
-                let suggestion = suggestions(&input).next();
-                if let Some(suggestion) = suggestion {
-                    input = suggestion.to_string();
-                }
+            _ if control(key, 'r') => return self.history_move(true, true),
+            _ => {}
+        }
+        let prompt = self.prompt.as_mut().expect("prompt is active");
+        if printable(key)
+            .is_some_and(|ch| !prompt.input.fits_replacement(ch.len_utf8(), COMMAND_LIMIT))
+        {
+            prompt.error = Some(COMMAND_TOO_LONG);
+            return Effect::Redraw;
+        }
+        let previous = prompt.input.value.clone();
+        if !prompt.input.edit(key, COMMAND_LIMIT) {
+            return Effect::Idle;
+        }
+        if prompt.input.value != previous || prompt.error != Some(COMMAND_TOO_LONG) {
+            prompt.changed();
+            self.history_index = None;
+        }
+        Effect::Redraw
+    }
+
+    fn handle_output(&mut self, key: KeyEvent) -> Effect {
+        let output = self.output.as_mut().expect("output is active");
+        if control(key, 'f') {
+            self.interaction.read_focus = false;
+            output
+                .find
+                .get_or_insert_with(|| Input::at_end(output.query.clone()));
+            return Effect::Redraw;
+        }
+        if key.code == KeyCode::F(3) && text_modifiers(key) {
+            output.search(key.modifiers.contains(KeyModifiers::SHIFT));
+            return Effect::Redraw;
+        }
+        let page = output.page_size.clamp(1, 10) as isize;
+        match key.code {
+            KeyCode::PageUp => return output.scroll_by(-page),
+            KeyCode::PageDown => return output.scroll_by(page),
+            KeyCode::Home if key.modifiers == KeyModifiers::CONTROL => {
+                return output.scroll_to(0, false);
             }
-            KeyCode::Backspace => {
-                input.pop();
-            }
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                    && input.len() < 2048 =>
-            {
-                input.push(character);
-            }
-            KeyCode::Enter if current.is_none() && !input.trim().is_empty() => {
-                let command = std::mem::take(&mut input);
-                history.push(command.clone());
-                if history.len() > 100 {
-                    history.remove(0);
-                }
-                history_index = history.len();
-                scroll = 0;
-                push(&mut output, format!("cnl> {command}"));
-                match spawn(workspace, flags, &command) {
-                    Ok(child) => current = Some(child),
-                    Err(error) => push(&mut output, error.to_string()),
-                }
+            KeyCode::End if key.modifiers == KeyModifiers::CONTROL => {
+                return output.scroll_to(output.last_page, true);
             }
             _ => {}
         }
+        if let Some(find) = &mut output.find {
+            return match key.code {
+                KeyCode::Enter | KeyCode::Esc => {
+                    output.find = None;
+                    Effect::Redraw
+                }
+                _ if find.edit(key, SEARCH_LIMIT) => {
+                    output.query.clone_from(&find.value);
+                    output.hit = None;
+                    output.search(false);
+                    Effect::Redraw
+                }
+                _ => Effect::Idle,
+            };
+        }
+        if key.code == KeyCode::Esc {
+            if output.running {
+                return self.cancel_output();
+            }
+            self.output = None;
+            self.interaction.reset_output();
+            self.close_main_prompt();
+            return Effect::Redraw;
+        }
+        if self.interaction.read_focus {
+            if printable(key) == Some(':') {
+                self.interaction.read_focus = false;
+                return Effect::Redraw;
+            }
+            return Effect::Idle;
+        }
+        self.edit_prompt(key)
     }
-}
 
-fn suggestions(input: &str) -> impl Iterator<Item = &'static str> + '_ {
-    COMMANDS
-        .iter()
-        .copied()
-        .filter(move |item| item.starts_with(input) && *item != input)
-}
+    fn handle(&mut self, key: KeyEvent) -> Effect {
+        self.handle_with_clipboard(key, &mut SystemClipboard)
+    }
 
-fn draw(input: &str, output: &VecDeque<String>, scroll: usize, busy: bool) -> Result<()> {
-    let (columns, rows) = terminal::size()?;
-    let width = usize::from(columns).saturating_sub(2);
-    let mut screen = io::stdout().lock();
-    queue!(screen, Clear(ClearType::All), MoveTo(0, 0))?;
-    let mut row = 0;
-    if columns >= 75 && rows >= 13 {
-        for (index, line) in BANNER.iter().enumerate() {
-            let color = [
-                Color::Cyan,
-                Color::Cyan,
-                Color::Blue,
-                Color::DarkBlue,
-                Color::DarkCyan,
-            ][index];
-            queue!(
-                screen,
-                MoveTo(1, row),
-                SetForegroundColor(color),
-                Print(clip(line, width))
-            )?;
-            row += 1;
+    fn handle_with_clipboard(
+        &mut self,
+        key: KeyEvent,
+        clipboard: &mut impl clipboard::Clipboard,
+    ) -> Effect {
+        if key.kind == KeyEventKind::Release {
+            return Effect::Idle;
+        }
+        if let Some(effect) = self.interaction_key(key, clipboard) {
+            return effect;
+        }
+        if control(key, 'c') {
+            if self.output.as_ref().is_some_and(|output| output.running) {
+                return self.cancel_output();
+            }
+            return Effect::Exit;
+        }
+        if self.output.is_some() {
+            return self.handle_output(key);
+        }
+        if key.code == KeyCode::Esc {
+            if self.close_main_prompt() {
+                return Effect::Redraw;
+            }
+            if self.search.take().is_some() {
+                self.refilter();
+                return Effect::Redraw;
+            }
+            if std::mem::take(&mut self.help) {
+                return Effect::Redraw;
+            }
+            return Effect::Exit;
+        }
+        if self.prompt.is_none()
+            && text_modifiers(key)
+            && !key.modifiers.contains(KeyModifiers::SHIFT)
+        {
+            let index = match key.code {
+                KeyCode::Up => Some(self.selected.saturating_sub(1)),
+                KeyCode::Down => Some(self.selected + 1),
+                KeyCode::Home if self.prompt.is_none() && self.search.is_none() => Some(0),
+                KeyCode::End if self.prompt.is_none() && self.search.is_none() => {
+                    Some(self.items.len().saturating_sub(1))
+                }
+                _ => None,
+            };
+            if let Some(index) = index {
+                let closed = self.close_main_prompt();
+                let selection = self.select(index);
+                return if closed { Effect::Redraw } else { selection };
+            }
+        }
+        if self.prompt.is_some() {
+            return self.edit_prompt(key);
+        }
+        if control(key, 'k') {
+            self.search = Some(Input::default());
+            self.help = false;
+            self.refilter();
+            return Effect::Redraw;
+        }
+        if control(key, 'r') && !self.history.is_empty() {
+            let draft = std::mem::take(&mut self.draft);
+            self.open_prompt(draft);
+            self.history_move(true, true);
+            return Effect::Redraw;
+        }
+        if key.code == KeyCode::Enter && text_modifiers(key) {
+            return self.activate();
+        }
+        if let Some(search) = &mut self.search {
+            let previous = search.value.clone();
+            if !search.edit(key, SEARCH_LIMIT) {
+                return Effect::Idle;
+            }
+            if search.value != previous {
+                self.refilter();
+            }
+            return Effect::Redraw;
+        }
+        match printable(key) {
+            Some('/') => {
+                self.search = Some(Input::default());
+                self.help = false;
+                Effect::Redraw
+            }
+            Some('?') => {
+                self.help = !self.help;
+                Effect::Redraw
+            }
+            Some(':') => {
+                let draft = std::mem::take(&mut self.draft);
+                self.open_prompt(draft);
+                Effect::Redraw
+            }
+            Some(ch) if !ch.is_whitespace() && !self.help => {
+                let draft = std::mem::take(&mut self.draft);
+                self.open_prompt(draft);
+                self.edit_prompt(key)
+            }
+            _ => Effect::Idle,
         }
     }
-    queue!(
-        screen,
-        MoveTo(1, row),
-        SetForegroundColor(Color::Cyan),
-        Print(clip("CIRNETLAB", width))
-    )?;
-    row += 1;
-    if row + 1 < rows {
-        let line = if busy {
-            "Running  ·  Esc cancel  ·  PgUp/PgDn scroll"
-        } else {
-            "Tab complete  ·  ↑/↓ history  ·  Esc exit  ·  PgUp/PgDn scroll"
-        };
-        queue!(
-            screen,
-            MoveTo(1, row),
-            SetForegroundColor(Color::DarkGrey),
-            Print(clip(line, width)),
-            ResetColor
-        )?;
-        row += 1;
-    }
-    let capacity = usize::from(rows.saturating_sub(row + 2));
-    let end = output.len().saturating_sub(scroll);
-    let start = end.saturating_sub(capacity);
-    for line in output.range(start..end) {
-        queue!(screen, MoveTo(1, row), Print(clip(line, width)))?;
-        row += 1;
-    }
-    if rows >= 2 {
-        let suggestions = suggestions(input).take(4).collect::<Vec<_>>().join("  ·  ");
-        queue!(
-            screen,
-            MoveTo(1, rows - 2),
-            SetForegroundColor(Color::DarkCyan),
-            Print(clip(&suggestions, width))
-        )?;
-    }
-    if rows > 0 {
-        let prompt = format!("cnl> {input}_");
-        queue!(
-            screen,
-            MoveTo(1, rows - 1),
-            SetForegroundColor(Color::Cyan),
-            Print(clip(&prompt, width)),
-            ResetColor
-        )?;
-    }
-    screen.flush()?;
-    Ok(())
-}
 
-fn clip(line: &str, mut width: usize) -> String {
-    line.chars()
-        .filter_map(|character| character.width().map(|width| (character, width)))
-        .take_while(|(_, columns)| {
-            if *columns > width {
-                return false;
-            }
-            width -= *columns;
-            true
-        })
-        .map(|(character, _)| character)
-        .collect()
-}
-
-fn push(output: &mut VecDeque<String>, line: String) {
-    if output.len() == OUTPUT_LINES {
-        output.pop_front();
-    }
-    output.push_back(line);
-}
-
-fn tokens(text: &str) -> Result<Vec<String>> {
-    let mut result = vec![];
-    let mut token = String::new();
-    let mut quote = None;
-    for character in text.chars() {
-        if quote == Some(character) {
-            quote = None;
-        } else if quote.is_none() && matches!(character, '"' | '\'') {
-            quote = Some(character);
-        } else if quote.is_none() && character.is_whitespace() {
-            if !token.is_empty() {
-                result.push(std::mem::take(&mut token));
-            }
-        } else {
-            token.push(character);
+    fn cancel_output(&mut self) -> Effect {
+        if let Some(output) = &mut self.output {
+            output.status = text(["Cancelling…", "Đang hủy…"], self.vi).into();
+            output.tone = Tone::Warning;
         }
+        Effect::Cancel
     }
-    if quote.is_some() {
-        bail!("Close the quoted argument before running a command");
+
+    fn paste(&mut self, value: &str) -> Effect {
+        if self.prompt.is_none() && self.output.is_none() && self.search.is_none() {
+            if self.help || value.trim().is_empty() {
+                return Effect::Idle;
+            }
+            let draft = std::mem::take(&mut self.draft);
+            self.open_prompt(draft);
+        }
+        self.paste_editor(value)
     }
-    if !token.is_empty() {
-        result.push(token);
+
+    fn paste_suppressed_newline(&mut self, value: &str) -> Effect {
+        let command_input = (self.prompt.is_some() || self.search.is_none())
+            && self
+                .output
+                .as_ref()
+                .is_none_or(|output| output.find.is_none())
+            && self
+                .prompt
+                .as_ref()
+                .is_none_or(|prompt| prompt.error.is_none());
+        let effect = self.paste(value);
+        if command_input
+            && matches!(effect, Effect::Redraw)
+            && let Some(prompt) = &mut self.prompt
+            && prompt.error.is_none()
+        {
+            prompt.error = Some(PASTE_NEWLINE_NOTICE);
+        }
+        effect
     }
-    Ok(result)
 }
 
-fn spawn(workspace: &Workspace, flags: &ArgMatches, text: &str) -> Result<Running> {
-    let arguments = tokens(text)?;
-    let parsed = crate::cli::app()
-        .try_get_matches_from(std::iter::once("cnl").chain(arguments.iter().map(String::as_str)));
-    let action = parsed.as_ref().ok().and_then(ArgMatches::subcommand_name);
-    if action == Some("tui") {
-        bail!("The CIRNETLAB terminal is already open");
-    }
-    let mut command = Command::new(std::env::current_exe()?);
-    command
-        .arg("--workspace")
-        .arg(&workspace.root)
-        .arg("--profile")
-        .arg(flags.get_one::<String>("profile").unwrap());
-    if let Some(path) = flags.get_one::<PathBuf>("state-dir") {
-        command.arg("--state-dir").arg(path);
-    }
-    hidden(
-        command
-            .args(&arguments)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
-    );
-    let mut child = command.spawn()?;
-    let job = if matches!(action, Some("run" | "dev" | "stop")) {
-        None
-    } else {
-        ProcessJob::attach(&child).ok()
-    };
-    let (send, messages) = mpsc::sync_channel(128);
-    reader(child.stdout.take().unwrap(), send.clone());
-    reader(child.stderr.take().unwrap(), send);
-    Ok(Running {
-        child,
-        messages,
-        job,
+fn safe_history(args: &[String]) -> bool {
+    // Keep only known command tokens and flag values. Paths and arbitrary
+    // arguments may contain credentials and should not be echoed or recalled.
+    let words = [
+        "doctor",
+        "env",
+        "show",
+        "check",
+        "set",
+        "setup",
+        "repos",
+        "discover",
+        "status",
+        "clone",
+        "update",
+        "build",
+        "run",
+        "dev",
+        "stop",
+        "verify",
+        "help",
+        "interface",
+        "en",
+        "vi",
+    ];
+    args.iter().all(|arg| {
+        words.contains(&arg.as_str())
+            || crate::workspace::Repo::KEYS.contains(&arg.as_str())
+            || [
+                "--all",
+                "--repo",
+                "--offline",
+                "--dry-run",
+                "--initialize-db",
+                "--open",
+                "--desktop",
+                "--help",
+                "--version",
+                "--json",
+                "--lang",
+                "--browser",
+            ]
+            .contains(&arg.as_str())
     })
 }
 
-fn reader(mut pipe: impl Read + Send + 'static, send: SyncSender<String>) {
-    thread::spawn(move || {
-        let mut buffer = [0; 1024];
-        let mut line = Vec::new();
-        while let Ok(count) = pipe.read(&mut buffer) {
-            if count == 0 {
-                break;
-            }
-            for &byte in &buffer[..count] {
-                if byte == b'\n' {
-                    let _ = send.try_send(String::from_utf8_lossy(&line).trim_end().into());
-                    line.clear();
-                } else if line.len() < 4096 {
-                    line.push(byte);
+fn output_title(args: &[String]) -> String {
+    if safe_history(args) {
+        return format!("cnl {}", args.join(" "));
+    }
+    args.iter()
+        .find(|arg| {
+            ENTRIES
+                .iter()
+                .any(|entry| entry.command.split_whitespace().next() == Some(arg))
+        })
+        .map_or_else(|| "cnl".into(), |command| format!("cnl {command}"))
+}
+
+fn read_events(batch: &mut Vec<Event>, running: bool) -> io::Result<()> {
+    batch.clear();
+    let timeout = if running {
+        Some(Duration::from_millis(16))
+    } else if cfg!(windows) {
+        Some(Duration::from_millis(120))
+    } else {
+        None
+    };
+    if let Some(timeout) = timeout
+        && !event::poll(timeout)?
+    {
+        return Ok(());
+    }
+    batch.push(event::read()?);
+    while batch.len() < 128 && event::poll(Duration::ZERO)? {
+        batch.push(event::read()?);
+    }
+    Ok(())
+}
+
+fn windows_paste(batch: &[Event], previous_text: usize) -> Option<String> {
+    // The Windows console input API reports unbracketed paste as queued keys.
+    // A newline in a queued text burst is input, never a submit.
+    let mut value = String::new();
+    let mut characters = previous_text;
+    let mut newline = false;
+    let mut paste_key = false;
+    for event in batch {
+        let key = match event {
+            Event::Key(key) => key,
+            Event::Resize(_, _) | Event::FocusGained => continue,
+            _ => return None,
+        };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        if control(*key, 'v') {
+            paste_key = true;
+        } else if let Some(ch) = printable(*key) {
+            characters += 1;
+            value.push(ch);
+        } else if key.code == KeyCode::Enter && text_modifiers(*key) {
+            newline = true;
+            value.push(' ');
+        } else {
+            return None;
+        }
+    }
+    ((newline || paste_key) && characters > 0).then_some(value)
+}
+
+fn skip_paste_companion(event: &Event, host_paste: bool, pasted: &mut bool) -> bool {
+    match event {
+        Event::Paste(_) => {
+            *pasted = true;
+            false
+        }
+        Event::Key(key) if control(*key, 'v') => {
+            *pasted = true;
+            host_paste
+        }
+        Event::Key(key) if key.code == KeyCode::Enter && *pasted => true,
+        _ => false,
+    }
+}
+
+fn show(
+    menu: &mut Menu,
+    color: bool,
+    banner: bool,
+    workspace: &Workspace,
+    flags: &ArgMatches,
+) -> io::Result<()> {
+    // Restore the terminal before joining an owned worker on an I/O error.
+    let mut running: Option<runner::Runner> = None;
+    let mut screen = Screen::enter(io::BufWriter::with_capacity(64 * 1024, io::stdout().lock()))?;
+    let mut painter = Painter::default();
+    let mut size = console::size()?;
+    let mut batch = Vec::with_capacity(128);
+    let mut redraw = true;
+    let mut last_size_check = Instant::now();
+    let mut paste_continuation = 0;
+    let mut clipboard = SystemClipboard;
+    loop {
+        if let Some(worker) = &mut running {
+            let update = worker.poll()?;
+            if let Some(output) = &mut menu.output {
+                if let Some(buffer) = update.buffer {
+                    output.buffer = buffer;
+                    if !output.query.is_empty() {
+                        output.last_page = output
+                            .buffer
+                            .layout(output.width)
+                            .saturating_sub(output.page_size.max(1));
+                        output.hit = None;
+                        output.search(false);
+                    }
+                    redraw = true;
+                }
+                if let Some(result) = update.result {
+                    output.finish(Ok(result));
+                    running = None;
+                    redraw = true;
                 }
             }
         }
-        if !line.is_empty() {
-            let _ = send.try_send(String::from_utf8_lossy(&line).trim_end().into());
+        if redraw {
+            painter.draw(
+                &mut screen.out,
+                view::frame(menu, size, banner, color),
+                color,
+            )?;
         }
-    });
-}
-
-#[cfg(windows)]
-struct ProcessJob(windows_sys::Win32::Foundation::HANDLE);
-
-#[cfg(windows)]
-impl ProcessJob {
-    fn attach(child: &Child) -> Result<Self> {
-        use std::{mem, os::windows::io::AsRawHandle, ptr};
-        use windows_sys::Win32::System::JobObjects::*;
-        let handle = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
-        if handle.is_null() {
-            return Err(io::Error::last_os_error().into());
-        }
-        let guard = Self(handle);
-        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if unsafe {
-            SetInformationJobObject(
-                handle,
-                JobObjectExtendedLimitInformation,
-                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                mem::size_of_val(&limits) as u32,
-            )
-        } == 0
-            || unsafe { AssignProcessToJobObject(handle, child.as_raw_handle()) } == 0
+        read_events(&mut batch, running.is_some())?;
+        redraw = false;
+        if batch
+            .iter()
+            .any(|event| matches!(event, Event::Resize(_, _)))
+            || (cfg!(windows) && last_size_check.elapsed() >= Duration::from_millis(120))
         {
-            return Err(io::Error::last_os_error().into());
+            let new_size = console::size()?;
+            last_size_check = Instant::now();
+            if new_size.0 > 0 && new_size.1 > 0 && new_size != size {
+                size = new_size;
+                redraw = true;
+            }
         }
-        Ok(guard)
+
+        let pending = std::mem::take(&mut paste_continuation);
+        if cfg!(windows) {
+            if batch.len() == 128 {
+                paste_continuation = pending + batch.iter().filter(|event| {
+                    matches!(event, Event::Key(key) if key.kind != KeyEventKind::Release && printable(*key).is_some())
+                }).count();
+            }
+            if let Some(paste) = windows_paste(&batch, pending) {
+                redraw |= matches!(menu.paste_suppressed_newline(&paste), Effect::Redraw);
+                continue;
+            }
+        }
+
+        let host_paste = batch.iter().any(|event| matches!(event, Event::Paste(_)));
+        let mut pasted = false;
+        for input in batch.drain(..) {
+            if skip_paste_companion(&input, host_paste, &mut pasted) {
+                continue;
+            }
+            let effect = match input {
+                Event::Key(key) => menu.handle(key),
+                Event::Paste(value) => menu.paste(&value),
+                Event::Mouse(mouse) => menu.mouse(mouse, painter.last_frame(size), &mut clipboard),
+                Event::FocusLost => menu.focus_lost(),
+                _ => Effect::Idle,
+            };
+            match effect {
+                Effect::Idle => {}
+                Effect::Redraw => redraw = true,
+                Effect::Cancel => {
+                    if let Some(worker) = &mut running
+                        && let Err(error) = worker.cancel()
+                        && let Some(output) = &mut menu.output
+                    {
+                        output.status = error.to_owned();
+                    }
+                    redraw = true;
+                }
+                Effect::Run(args) => {
+                    menu.begin_output(&args);
+                    match runner::Runner::start(workspace, flags, &args) {
+                        Ok(worker) => {
+                            menu.output.as_mut().expect("output was created").follow = true;
+                            running = Some(worker);
+                        }
+                        Err(error) => menu
+                            .output
+                            .as_mut()
+                            .expect("output was created")
+                            .finish(Err(error.to_string())),
+                    }
+                    redraw = true;
+                }
+                Effect::Exit => return Ok(()),
+            }
+        }
     }
 }
 
-#[cfg(windows)]
-impl Drop for ProcessJob {
-    fn drop(&mut self) {
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+pub fn open(workspace: &Workspace, flags: &ArgMatches) -> anyhow::Result<()> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        anyhow::bail!("cnl tui requires an interactive terminal");
     }
-}
-#[cfg(not(windows))]
-struct ProcessJob;
-#[cfg(not(windows))]
-impl ProcessJob {
-    fn attach(_: &Child) -> Result<Self> {
-        bail!("Process tree cancellation is available on Windows")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn input_keeps_quoted_paths_and_suggests_commands() {
-        assert_eq!(
-            tokens(r#"run --receipt "D:\CIRNET LAB\assembly-result.json""#).unwrap(),
-            ["run", "--receipt", r"D:\CIRNET LAB\assembly-result.json"]
-        );
-        assert!(tokens("run 'unfinished").is_err());
-        assert_eq!(
-            suggestions("repos ").collect::<Vec<_>>(),
-            ["repos discover", "repos status"]
-        );
-    }
+    let vi = flags
+        .get_one::<String>("lang")
+        .is_some_and(|language| language == "vi");
+    let mut menu = Menu::new(vi);
+    show(&mut menu, terminal::color_enabled(), true, workspace, flags)?;
+    Ok(())
 }

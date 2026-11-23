@@ -56,3 +56,26 @@ fn lifecycle_supports_explicit_database_consent_and_output() {
             .is_err()
     );
 }
+
+#[test]
+fn desktop_interface_is_supported_by_both_runtime_commands() {
+    for command in ["run", "dev"] {
+        let matches = cli::app()
+            .try_get_matches_from(["cnl", command, "--desktop", "interface", "--dry-run"])
+            .unwrap();
+        assert_eq!(
+            matches
+                .subcommand()
+                .unwrap()
+                .1
+                .get_one::<String>("desktop")
+                .map(String::as_str),
+            Some("interface")
+        );
+        assert!(
+            cli::app()
+                .try_get_matches_from(["cnl", command, "--desktop", "unknown"])
+                .is_err()
+        );
+    }
+}

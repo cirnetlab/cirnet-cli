@@ -42,7 +42,10 @@ pub fn candidate(
         None => {
             let latest: PathBuf = serde_json::from_slice(
                 &fs::read(state.dir.join("candidate.json"))
-                    .context("Run cnl build --all or select an existing --receipt")?,
+                    .with_context(|| format!(
+                        "Cannot read the candidate for profile {}. Run cnl build --all with the same workspace and profile, or pass --receipt <assembly-result.json>",
+                        state.dir.display()
+                    ))?,
             )?;
             latest
         }

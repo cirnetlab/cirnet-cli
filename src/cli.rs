@@ -1,3 +1,5 @@
+pub(crate) mod catalog;
+
 use std::{io::IsTerminal, path::PathBuf};
 
 use anyhow::{Result, bail};
@@ -43,12 +45,18 @@ fn selected() -> Arg {
 }
 
 fn runtime_args(name: &'static str, help: &'static str) -> Command {
-    ports(Command::new(name).about(help).args([
-        path("receipt", "Remote assembly-result.json"),
-        flag("initialize-db", "Initialize a new local SQLite database"),
-        flag("open", "Open the application after readiness"),
-        flag("dry-run", "Preview without applying"),
-    ]))
+    ports(
+        Command::new(name).about(help).args([
+            path("receipt", "Remote assembly-result.json"),
+            Arg::new("desktop")
+                .long("desktop")
+                .value_parser(["interface"])
+                .help("Open the existing Interface in the desktop browser"),
+            flag("initialize-db", "Initialize a new local SQLite database"),
+            flag("open", "Open the application after readiness"),
+            flag("dry-run", "Preview without applying"),
+        ]),
+    )
 }
 
 pub fn app() -> Command {
@@ -85,6 +93,12 @@ pub fn app() -> Command {
                 .global(true)
                 .default_value("windows-x64"),
             flag("json", "Emit a JSON report on stdout").global(true),
+            Arg::new("lang")
+                .long("lang")
+                .value_parser(["en", "vi"])
+                .default_value("en")
+                .help("Terminal language")
+                .global(true),
         ])
         .subcommands([
             Command::new("tui").about("Open the CIRNETLAB terminal"),
@@ -143,6 +157,13 @@ pub fn app() -> Command {
                     flag("dry-run", "Preview verification"),
                 ]),
         ])
+        .mut_subcommands(|command| {
+            if let Some(description) = catalog::detail(command.get_name(), false) {
+                command.about(description)
+            } else {
+                command
+            }
+        })
 }
 
 pub fn run() -> Result<()> {
