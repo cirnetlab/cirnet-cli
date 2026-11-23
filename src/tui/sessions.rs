@@ -387,10 +387,10 @@ impl Output {
         std::mem::take(&mut self.parser.callbacks_mut().0)
     }
 
-    fn resize(&mut self, size: PtySize) {
+    fn resize(&mut self, size: PtySize, failed: bool) {
         let (rows, columns) = dimensions(size);
         self.parser.set_size(rows, columns);
-        self.resize_failed = false;
+        self.resize_failed = failed;
         self.changed();
     }
 

@@ -222,6 +222,12 @@ fn running_shell_observes_resize_and_reports_exit_code() {
     let shell = if cfg!(windows) { "cmd" } else { "bash" };
     let mut session =
         Session::start("org/one", &repo, Some(shell), pty_size((85, 26)), false).unwrap();
+    let ready = "CNL_PTY_READY";
+    assert!(session.send(format!("echo {ready}\r").into_bytes()));
+    output_matches(&session, ready, |output| {
+        output.lines().any(|line| line.trim() == ready)
+    });
+
     let target_size = pty_size((112, 31));
     session.resize(target_size);
     wait_until(|| {
@@ -229,13 +235,15 @@ fn running_shell_observes_resize_and_reports_exit_code() {
         assert!(!output.resize_failed);
         output.parser.screen().size() == dimensions(target_size)
     });
-    let command = if cfg!(windows) {
-        "mode con\r"
-    } else {
-        "stty size\r"
-    };
-    assert!(session.send(command.as_bytes().to_vec()));
-    output_contains(&session, if cfg!(windows) { "112" } else { "31 112" });
+    #[cfg(windows)]
+    wait_for_windows_console_size(&session, target_size);
+    #[cfg(not(windows))]
+    {
+        assert!(session.send(b"stty size\r".to_vec()));
+        output_matches(&session, "31 112", |output| {
+            output.lines().any(|line| line.trim() == "31 112")
+        });
+    }
     assert!(session.send(b"exit 7\r".to_vec()));
     wait_until(|| {
         let output = session.output.lock().unwrap();
@@ -244,6 +252,38 @@ fn running_shell_observes_resize_and_reports_exit_code() {
             .as_ref()
             .is_some_and(|code| code.as_ref().unwrap().exit_code() == 7)
     });
+}
+
+#[cfg(windows)]
+fn wait_for_windows_console_size(session: &Session, size: PtySize) {
+    let expected = [Some(size.rows), Some(size.cols)];
+    let mut actual = [None, None];
+    // ConPTY can finish processing a resize after the API call returns.
+    // Wait for shell output between probes, and require both dimensions.
+    for attempt in 0..3 {
+        let start = format!("CNL_MODE_BEGIN_{attempt}");
+        let end = format!("CNL_MODE_END_{attempt}");
+        let command = format!("echo {start} & mode con & echo {end}\r");
+        assert!(session.send(command.into_bytes()));
+        output_matches(session, &end, |output| {
+            output.lines().any(|line| line.trim() == end)
+        });
+
+        let output = session.output.lock().unwrap().parser.screen().contents();
+        // MODE reports rows and columns as the first two numeric fields.
+        let mut values = output
+            .lines()
+            .map(str::trim)
+            .skip_while(|line| *line != start)
+            .skip(1)
+            .take_while(|line| *line != end)
+            .filter_map(|line| line.split_once(':')?.1.trim().parse::<u16>().ok());
+        actual = [values.next(), values.next()];
+        if actual == expected {
+            return;
+        }
+    }
+    assert_eq!(actual, expected, "CMD console dimensions after resizing");
 }
 
 #[test]

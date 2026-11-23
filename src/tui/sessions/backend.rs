@@ -136,7 +136,7 @@ impl Backend {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => false,
             Err(TrySendError::Disconnected(_)) => {
-                self.output.lock().unwrap().resize(size);
+                self.output.lock().unwrap().resize(size, false);
                 true
             }
         }
@@ -323,12 +323,9 @@ impl Process {
             }
             match sizes.recv_timeout(Duration::from_millis(150)) {
                 Ok(size) => {
-                    output.lock().unwrap().resize(size);
-                    if self.master.resize(size).is_err() {
-                        let mut output = output.lock().unwrap();
-                        output.resize_failed = true;
-                        output.changed();
-                    }
+                    // Publish the new parser size only after the native resize returns.
+                    let failed = self.master.resize(size).is_err();
+                    output.lock().unwrap().resize(size, failed);
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
