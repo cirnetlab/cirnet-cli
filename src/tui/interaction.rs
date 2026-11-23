@@ -3,9 +3,10 @@ use super::{
     clipboard::{Clipboard, ClipboardError},
     control,
     editor::byte_at_column,
-    terminal::{Frame, InputHit, Line, PalettePart, Tone},
+    terminal::{Frame, InputHit, Line, PalettePart, SourceRow, Tone},
     text,
 };
+use crate::localization::{Localized, terminal as labels};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
@@ -44,117 +45,132 @@ impl Action {
     fn label(self, vi: bool) -> &'static str {
         text(
             match self {
-                Self::Copy => ["Copy", "Sao chép"],
-                Self::Cut => ["Cut", "Cắt"],
-                Self::Paste => ["Paste", "Dán"],
-                Self::Delete => ["Delete", "Xóa"],
-                Self::SelectAll => ["Select all", "Chọn tất cả"],
-                Self::Undo => ["Undo", "Hoàn tác"],
-                Self::Redo => ["Redo", "Làm lại"],
-                Self::CopyLine => ["Copy line", "Sao chép dòng"],
+                Self::Copy => labels::COPY,
+                Self::Cut => labels::CUT,
+                Self::Paste => labels::PASTE,
+                Self::Delete => labels::DELETE,
+                Self::SelectAll => labels::SELECT_ALL,
+                Self::Undo => labels::UNDO,
+                Self::Redo => labels::REDO,
+                Self::CopyLine => labels::COPY_LINE,
             },
             vi,
         )
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-struct Point {
-    row: usize,
-    byte: usize,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Selection {
-    anchor: Point,
-    end: Point,
+    anchor: usize,
+    end: usize,
 }
 
 impl Selection {
-    fn bounds(self) -> (Point, Point) {
-        (self.anchor.min(self.end), self.anchor.max(self.end))
+    fn bytes(self) -> Range<usize> {
+        self.anchor.min(self.end)..self.anchor.max(self.end)
     }
 
     fn active(self) -> bool {
         self.anchor != self.end
     }
-
-    fn row(self, index: usize, len: usize) -> Option<Range<usize>> {
-        let (start, end) = self.bounds();
-        (start.row..=end.row).contains(&index).then(|| {
-            let left = if index == start.row { start.byte } else { 0 };
-            let right = if index == end.row { end.byte } else { len };
-            left.min(len)..right.min(len)
-        })
-    }
 }
 
-#[derive(Default, PartialEq, Eq)]
+#[derive(Default)]
 struct Visible {
     first: u16,
-    lines: Vec<String>,
+    inset: usize,
+    lines: Vec<VisibleLine>,
+}
+
+struct VisibleLine {
+    text: Line,
+    source: SourceRow,
 }
 
 impl Visible {
     fn capture(frame: &Frame) -> Self {
-        let Some(rows) = &frame.readable else {
+        let Some(view) = &frame.readable else {
             return Self::default();
         };
         let mut bytes = 0;
-        let lines = rows
-            .clone()
+        let lines = view
+            .rows
+            .iter()
             .take(512)
-            .filter_map(|row| frame.rows.get(usize::from(row)))
-            .map(Line::contents)
-            .take_while(|line| {
-                bytes += line.len();
+            .zip(&frame.rows[usize::from(view.first)..])
+            .take_while(|(row, line)| {
+                bytes += row.bytes.len().max(line.contents().len());
                 bytes <= super::clipboard::MAX_BYTES
             })
-            .map(str::to_owned)
+            .map(|(source, line)| VisibleLine {
+                text: line.clone(),
+                source: source.clone(),
+            })
             .collect();
         Self {
-            first: rows.start,
+            first: view.first,
+            inset: view.inset,
             lines,
         }
     }
 
-    fn point(&self, column: u16, row: u16, clamp: bool) -> Option<Point> {
+    fn row(&self, row: u16, clamp: bool) -> Option<&VisibleLine> {
         let last = self.lines.len().checked_sub(1)?;
         let index = if clamp {
             usize::from(row.saturating_sub(self.first)).min(last)
         } else {
             usize::from(row.checked_sub(self.first)?)
         };
-        let value = self.lines.get(index)?;
-        Some(Point {
-            row: index,
-            byte: byte_at_column(value, usize::from(column)),
-        })
+        self.lines.get(index)
+    }
+
+    fn point(&self, column: u16, row: u16, clamp: bool) -> Option<usize> {
+        let line = self.row(row, clamp)?;
+        let offset = byte_at_column(
+            &line.text.contents()[self.inset..],
+            usize::from(column).saturating_sub(self.inset),
+        );
+        if line.source.substituted && offset != 0 {
+            Some(line.source.bytes.end)
+        } else {
+            Some(line.source.bytes.start + offset)
+        }
+    }
+
+    fn copy_line(&self, from: Option<usize>) -> Option<&str> {
+        let line = from
+            .and_then(|byte| {
+                self.lines
+                    .iter()
+                    .rfind(|line| line.source.bytes.start <= byte)
+            })
+            .or_else(|| self.lines.first())?;
+        Some(line.text.contents().trim())
     }
 
     fn all(&self) -> Option<Selection> {
-        let row = self.lines.len().checked_sub(1)?;
         Some(Selection {
-            anchor: Point::default(),
-            end: Point {
-                row,
-                byte: self.lines[row].len(),
-            },
+            anchor: self.lines.first()?.source.bytes.start,
+            end: self.lines.last()?.source.bytes.end,
         })
     }
 
-    fn selected_text(&self, selection: Selection) -> Option<String> {
-        selection.active().then(|| {
-            self.lines
-                .iter()
-                .enumerate()
-                .filter_map(|(index, line)| {
-                    let range = selection.row(index, line.len())?;
-                    Some(line.get(range)?.to_owned())
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
+    fn decorate(&self, frame: &mut Frame, selection: Selection) {
+        let selected = selection.bytes();
+        for (index, line) in self.lines.iter().enumerate() {
+            let source = &line.source.bytes;
+            let left = selected.start.max(source.start);
+            let right = selected.end.min(source.end);
+            if left >= right {
+                continue;
+            }
+            let range = if line.source.substituted {
+                self.inset..line.text.contents().len()
+            } else {
+                self.inset + left - source.start..self.inset + right - source.start
+            };
+            frame.rows[usize::from(self.first) + index].select(range);
+        }
     }
 }
 
@@ -173,8 +189,17 @@ struct Popup {
     position: (u16, u16),
 }
 
+struct PopupLayout {
+    left: u16,
+    top: u16,
+    width: u16,
+    first: usize,
+    count: usize,
+    border: u16,
+}
+
 impl Popup {
-    fn bounds(&self, size: (u16, u16), vi: bool) -> (u16, u16, u16, usize, usize) {
+    fn bounds(&self, size: (u16, u16), vi: bool) -> PopupLayout {
         let width = (self
             .items
             .iter()
@@ -183,19 +208,35 @@ impl Popup {
             .unwrap_or(0)
             + 5)
         .min(usize::from(size.0.saturating_sub(1))) as u16;
-        let count = self.items.len().min(usize::from(size.1.saturating_sub(2)));
+        let border = u16::from(width >= 5 && size.1 >= 3);
+        let count = self.items.len().min(usize::from(size.1 - 2 * border));
         let first = self.selected.saturating_sub(count.saturating_sub(1));
         let left = self.position.0.min(size.0.saturating_sub(width + 1));
-        let top = self.position.1.min(size.1.saturating_sub(count as u16 + 2));
-        (left, top, width, first, count)
+        let top = self.position.1.min(size.1 - count as u16 - 2 * border);
+        PopupLayout {
+            left,
+            top,
+            width,
+            first,
+            count,
+            border,
+        }
     }
 
     fn hit(&self, size: (u16, u16), vi: bool, column: u16, row: u16) -> Option<usize> {
-        let (left, top, width, first, count) = self.bounds(size, vi);
-        (width >= 4
-            && (left + 1..left + width - 1).contains(&column)
-            && (top + 1..top + 1 + count as u16).contains(&row))
-        .then(|| first + usize::from(row - top - 1))
+        let PopupLayout {
+            left,
+            top,
+            width,
+            first,
+            count,
+            border,
+        } = self.bounds(size, vi);
+        let start_row = top + border;
+        (width >= 2
+            && (left + border..left + width - border).contains(&column)
+            && (start_row..start_row + count as u16).contains(&row))
+        .then(|| first + usize::from(row - start_row))
     }
 
     fn step(&mut self, offset: isize) {
@@ -205,40 +246,60 @@ impl Popup {
             .min(self.items.len() - 1);
     }
 
-    fn draw(&self, frame: &mut Frame, vi: bool) {
-        let (left, top, width, first, count) = self.bounds(frame.size, vi);
-        if width < 4 || count == 0 {
-            return;
+    fn draw(&self, frame: &mut Frame, vi: bool) -> bool {
+        let PopupLayout {
+            left,
+            top,
+            width,
+            first,
+            count,
+            border,
+        } = self.bounds(frame.size, vi);
+        if width < 2 || count == 0 {
+            return false;
         }
         frame.cursor = None;
         let edge = Tone::Palette(PalettePart::ContextEdge);
-        let inner = usize::from(width) - 2;
-        for offset in 0..count + 2 {
+        let border = usize::from(border);
+        let inner = usize::from(width) - 2 * border;
+        let marker = if inner >= 4 { 2 } else { 1 };
+        for offset in 0..count + 2 * border {
             let row = &mut frame.rows[usize::from(top) + offset];
             let mut overlay = Line::default();
             match offset {
-                0 => overlay.push(edge, format!("╭{}╮", "─".repeat(inner))),
-                end if end == count + 1 => {
+                0 if border != 0 => overlay.push(edge, format!("╭{}╮", "─".repeat(inner))),
+                end if border != 0 && end == count + 1 => {
                     overlay.push(edge, format!("╰{}╯", "─".repeat(inner)));
                 }
                 _ => {
-                    let index = first + offset - 1;
+                    let index = first + offset - border;
                     let selected = index == self.selected;
                     let tone = if selected {
                         Tone::Palette(PalettePart::ContextSelected)
                     } else {
                         Tone::Palette(PalettePart::ContextItem)
                     };
-                    let label = fit(self.items[index].label(vi), inner - 2);
-                    overlay.push(edge, "│");
-                    overlay.push(tone, if selected { "› " } else { "  " });
+                    let label = fit(self.items[index].label(vi), inner - marker);
+                    if border != 0 {
+                        overlay.push(edge, "│");
+                    }
+                    let prefix = match (selected, marker) {
+                        (true, 2) => "› ",
+                        (true, _) => "›",
+                        (false, 2) => "  ",
+                        (false, _) => " ",
+                    };
+                    overlay.push(tone, prefix);
                     overlay.push(tone, label);
-                    overlay.push(tone, " ".repeat(inner - 2 - label.width()));
-                    overlay.push(edge, "│");
+                    overlay.push(tone, " ".repeat(inner - marker - label.width()));
+                    if border != 0 {
+                        overlay.push(edge, "│");
+                    }
                 }
             }
             overlay_line(row, usize::from(left), usize::from(width), &overlay);
         }
+        true
     }
 }
 
@@ -287,9 +348,15 @@ pub(super) struct Interaction {
     line: Option<usize>,
     press: Option<Press>,
     popup: Option<Popup>,
-    feedback: Option<String>,
+    feedback: Option<Feedback>,
     pub(super) read_focus: bool,
     last_cursor: Option<(u16, u16)>,
+}
+
+#[derive(Clone, Copy)]
+enum Feedback {
+    Notice(Localized),
+    Clipboard(&'static str),
 }
 
 impl Interaction {
@@ -297,40 +364,48 @@ impl Interaction {
         *self = Self::default();
     }
 
+    pub(super) fn invalidate_output_selection(&mut self) {
+        self.selection = None;
+        self.line = None;
+        if matches!(self.press, Some(Press::Read)) {
+            self.press = None;
+        }
+    }
+
     pub(super) fn decorate(&mut self, frame: &mut Frame, vi: bool) {
         self.last_cursor = frame.cursor;
-        let visible = Visible::capture(frame);
-        if visible != self.visible {
-            self.visible = visible;
-            self.selection = None;
-            self.line = None;
-        }
+        self.visible = Visible::capture(frame);
         if let Some(selection) = self.selection.filter(|selection| selection.active()) {
-            for (index, value) in self.visible.lines.iter().enumerate() {
-                if let Some(range) = selection.row(index, value.len()) {
-                    frame.rows[usize::from(self.visible.first) + index].select(range);
-                }
-            }
+            self.visible.decorate(frame, selection);
         }
         if self.read_focus && frame.input.is_some() {
             frame.cursor = None;
         }
-        if let Some(feedback) = &self.feedback
-            && frame.size.1 > 1
+        if let Some(feedback) = self.feedback
+            && let Some(row) = frame.feedback_row
         {
-            let mut row = frame.size.1 - 1;
-            if frame.input.as_ref().is_some_and(|input| input.row == row) {
-                row -= 1;
-            }
+            let message = match feedback {
+                Feedback::Notice(label) => std::borrow::Cow::Borrowed(text(label, vi)),
+                Feedback::Clipboard(code) => std::borrow::Cow::Owned(format!(
+                    "{code} · {}",
+                    text(labels::CLIPBOARD_SHORTCUT, vi)
+                )),
+            };
             let mut line = Line::default();
             line.push(
                 Tone::Warning,
-                fit(feedback, usize::from(frame.size.0.saturating_sub(1))),
+                fit(&message, usize::from(frame.size.0.saturating_sub(1))),
             );
             frame.rows[usize::from(row)] = line;
         }
-        if let Some(popup) = &self.popup {
-            popup.draw(frame, vi);
+        if let Some(popup) = &self.popup
+            && !popup.draw(frame, vi)
+        {
+            self.popup = None;
+            self.press = None;
+        }
+        if frame.cursor.is_none() {
+            frame.input_border = None;
         }
     }
 }
@@ -392,7 +467,7 @@ impl Menu {
                 if let Some(prompt) = &mut self.prompt {
                     prompt.changed();
                 }
-                self.history_index = None;
+                self.history.reset_navigation();
             }
             Editor::MenuSearch => self.refilter(),
             Editor::OutputSearch => {
@@ -429,16 +504,7 @@ impl Menu {
                 {
                     prompt.error = Some(COMMAND_TOO_LONG);
                 } else {
-                    self.interaction.feedback = Some(
-                        text(
-                            [
-                                "Search text exceeds its limit.",
-                                "Văn bản tìm kiếm vượt giới hạn.",
-                            ],
-                            self.vi,
-                        )
-                        .into(),
-                    );
+                    self.interaction.feedback = Some(Feedback::Notice(labels::SEARCH_TOO_LONG));
                 }
                 Effect::Redraw
             }
@@ -446,17 +512,7 @@ impl Menu {
     }
 
     fn clipboard_error(&mut self, error: ClipboardError) -> Effect {
-        self.interaction.feedback = Some(format!(
-            "{} · {}",
-            error.code(),
-            text(
-                [
-                    "Use the terminal's copy or paste shortcut.",
-                    "Dùng phím sao chép hoặc dán của terminal."
-                ],
-                self.vi
-            )
-        ));
+        self.interaction.feedback = Some(Feedback::Clipboard(error.code()));
         Effect::Redraw
     }
 
@@ -468,7 +524,7 @@ impl Menu {
             self.clipboard_error(error);
             return false;
         }
-        self.interaction.feedback = Some(text(["Copied", "Đã sao chép"], self.vi).into());
+        self.interaction.feedback = Some(Feedback::Notice(labels::COPIED));
         true
     }
 
@@ -488,16 +544,7 @@ impl Menu {
                     return Effect::Idle;
                 };
                 if !clipboard_safe_output(&input.value) {
-                    self.interaction.feedback = Some(
-                        text(
-                            [
-                                "Sensitive text was withheld.",
-                                "Đã giữ lại văn bản nhạy cảm.",
-                            ],
-                            self.vi,
-                        )
-                        .into(),
-                    );
+                    self.interaction.feedback = Some(Feedback::Notice(labels::SENSITIVE_TEXT));
                     return Effect::Redraw;
                 }
                 if self.write_clipboard(clipboard, &value)
@@ -537,11 +584,15 @@ impl Menu {
             Action::Copy => self
                 .interaction
                 .selection
-                .and_then(|selection| visible.selected_text(selection)),
-            Action::CopyLine => visible
-                .lines
-                .get(self.interaction.line.unwrap_or(0))
-                .map(|line| line.trim().to_owned()),
+                .filter(|selection| selection.active())
+                .and_then(|selection| {
+                    self.output
+                        .as_ref()?
+                        .buffer
+                        .copy(selection.bytes())
+                        .map(str::to_owned)
+                }),
+            Action::CopyLine => visible.copy_line(self.interaction.line).map(str::to_owned),
             Action::SelectAll => {
                 self.interaction.selection = visible.all();
                 return Effect::Redraw;
@@ -779,11 +830,11 @@ impl Menu {
             MouseEventKind::Down(MouseButton::Right) => {
                 let editor = self.focus_input_at(frame, column, row);
                 if editor.is_none() {
-                    let Some(point) = self.interaction.visible.point(column, row, false) else {
+                    let Some(line) = self.interaction.visible.row(row, false) else {
                         return Effect::Idle;
                     };
                     self.interaction.read_focus = true;
-                    self.interaction.line = Some(point.row);
+                    self.interaction.line = Some(line.source.bytes.start);
                 }
                 self.open_context_menu(Some((column, row)))
             }
@@ -808,7 +859,11 @@ impl Menu {
                 }
                 if let Some(point) = self.interaction.visible.point(column, row, false) {
                     self.interaction.read_focus = true;
-                    self.interaction.line = Some(point.row);
+                    self.interaction.line = self
+                        .interaction
+                        .visible
+                        .row(row, false)
+                        .map(|line| line.source.bytes.start);
                     self.interaction.selection = Some(Selection {
                         anchor: point,
                         end: point,
@@ -896,6 +951,60 @@ impl Menu {
 mod popup_tests {
     use super::*;
 
+    #[derive(Default)]
+    struct TestClipboard(String);
+
+    impl Clipboard for TestClipboard {
+        fn get_text(&mut self) -> Result<String, ClipboardError> {
+            Ok(self.0.clone())
+        }
+
+        fn set_text(&mut self, text: &str) -> Result<(), ClipboardError> {
+            self.0 = text.to_owned();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn mouse_selection_copies_original_graphemes_after_reflow() {
+        use crate::tui::{view, viewport::Buffer};
+
+        let mut menu = Menu::new(true);
+        menu.begin_output(&["env".into()]);
+        let output = menu.output.as_mut().unwrap();
+        output.buffer = Buffer::from_streams("đầu 🧑‍💻 cuối dòng\nnext\n".into(), "", None);
+        output.running = false;
+        let original = view::frame(&mut menu, (40, 10), false, true);
+        let row = original.readable.as_ref().unwrap().first;
+        let mut clipboard = TestClipboard::default();
+        for (kind, column) in [
+            (MouseEventKind::Down(MouseButton::Left), 2),
+            (MouseEventKind::Up(MouseButton::Left), 8),
+        ] {
+            menu.mouse(
+                MouseEvent {
+                    kind,
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                },
+                Some(&original),
+                &mut clipboard,
+            );
+        }
+        let compact = view::frame(&mut menu, (6, 6), false, true);
+        assert_eq!(
+            compact
+                .rows
+                .iter()
+                .filter(|line| line.has(Tone::Selection))
+                .count(),
+            2
+        );
+        menu.clipboard_action(Action::Copy, &mut clipboard);
+        assert_eq!(clipboard.0, "đầu 🧑‍💻");
+    }
+
     #[test]
     fn popup_clamps_to_terminal_and_never_hits_its_border() {
         let popup = Popup {
@@ -904,7 +1013,13 @@ mod popup_tests {
             position: (58, 18),
         };
         let mut frame = Frame::new((60, 20));
-        let (left, top, width, _, count) = popup.bounds(frame.size, true);
+        let PopupLayout {
+            left,
+            top,
+            width,
+            count,
+            ..
+        } = popup.bounds(frame.size, true);
         assert_eq!(count, 2);
         assert!(left + width < frame.size.0);
         assert!(top + 3 < frame.size.1);
@@ -917,6 +1032,17 @@ mod popup_tests {
             frame.rows[usize::from(top + 1)]
                 .contents()
                 .contains("Sao chép")
+        );
+
+        let mut compact = Frame::new((6, 2));
+        assert!(popup.draw(&mut compact, true));
+        assert_eq!(popup.hit(compact.size, true, 0, 0), Some(0));
+        assert_eq!(popup.hit(compact.size, true, 0, 1), Some(1));
+        assert!(
+            compact
+                .rows
+                .iter()
+                .all(|row| !row.has(Tone::Palette(PalettePart::ContextEdge)))
         );
     }
 }

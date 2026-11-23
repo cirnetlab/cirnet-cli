@@ -35,6 +35,7 @@ Các ví dụ bên dưới dùng `cnl`. Nếu CLI chưa có trong PATH, dùng `&
 | `--profile <NAME>` | Chọn hồ sơ. Mặc định là `windows-x64`. Tên có thể chứa chữ, số, dấu gạch ngang hoặc gạch dưới. Dùng cùng workspace, thư mục trạng thái và hồ sơ trong suốt một vòng chạy. |
 | `--json` | Ghi báo cáo có cấu trúc ra stdout. Chế độ này ẩn tiến độ trên stdout của tiến trình con. Thông báo chẩn đoán vẫn đi qua stderr. |
 | `--lang en\|vi` | Chọn ngôn ngữ CLI và terminal tương tác. Mặc định là `en`. |
+| `--persist-history` | Lưu lịch sử lệnh CNL đủ điều kiện vào hồ sơ TUI đã chọn. Mặc định lịch sử chỉ nằm trong bộ nhớ. |
 | `-h`, `--help` | Hiện trợ giúp cho lệnh đã chọn. |
 | `-V`, `--version` | Xem phiên bản CLI ở cấp lệnh chính. |
 
@@ -114,11 +115,15 @@ cnl verify --repo cli
 
 ## Terminal tương tác
 
-Dùng phím mũi tên để điều hướng, `/` để lọc menu, `:` để nhập lệnh, Tab hoặc Shift+Tab để duyệt gợi ý và `?` để xem trợ giúp. Ctrl+R tìm trong lịch sử lệnh. Page Up và Page Down cuộn đầu ra, Ctrl+F tìm nội dung, F3 chuyển đến kết quả tiếp theo. Nhập `clear` trong TUI để xóa phần kết quả đang hiển thị. Esc quay lại hoặc hủy lệnh hỗ trợ hủy. Dùng `cnl stop` để dừng ứng dụng. Đặt `NO_COLOR=1` trước khi mở TUI để tắt màu.
+Dùng phím mũi tên để điều hướng, `/` để lọc menu, `:` để nhập lệnh, Tab hoặc Shift+Tab để duyệt gợi ý và `?` để xem trợ giúp. Trong ô nhập lệnh, phím lên và xuống gọi lại các lệnh đủ điều kiện. Ctrl+R tìm lệnh cũ theo phần đã nhập. Esc thoát lịch sử và khôi phục bản nháp. Page Up và Page Down cuộn đầu ra, Ctrl+F tìm nội dung, F3 chuyển đến kết quả tiếp theo. Nhập `clear` trong TUI để xóa phần kết quả đang hiển thị. Dùng `cnl stop` để dừng ứng dụng.
 
-Rê chuột lên mục gợi ý để tô sáng. Bấm để chèn mục vào vị trí nhập và nhấn Enter để chạy lệnh. Nhấp chuột phải hoặc nhấn Shift+F10 để mở menu ngữ cảnh. Nhập `cnl --lang vi` hoặc `cnl --lang en` để đổi ngôn ngữ ngay trong TUI. Đặt `CNL_REDUCED_MOTION=1` để tắt hiệu ứng chờ.
+Rê chuột lên mục gợi ý để tô sáng. Bấm để chèn mục vào vị trí nhập và nhấn Enter để chạy lệnh. Nhấp chuột phải hoặc nhấn Shift+F10 để mở menu ngữ cảnh. Nhấn F8 để đổi giữa tiếng Anh và tiếng Việt mà vẫn giữ bản nháp và kết quả hiện tại. Bạn cũng có thể nhập `cnl --lang vi` hoặc `cnl --lang en`. Viền ô nhập có hiệu ứng chuyển động trên terminal hỗ trợ True Color. Đặt `CNL_REDUCED_MOTION=1` để tắt hiệu ứng viền và hiệu ứng chờ, hoặc `NO_COLOR=1` để dùng chế độ đơn sắc.
 
 Nhập lệnh native trực tiếp, ví dụ `git status` hoặc `Get-ChildItem | Select-Object -First 5` trên Windows. Mỗi lệnh chạy trong tiến trình riêng. Dùng `cnl shell` nếu cần giữ thay đổi thư mục làm việc hoặc biến môi trường qua nhiều lệnh native. Nhập `exit` trong shell để trở lại TUI.
+
+TUI gợi ý nhánh Git cục bộ, các tùy chọn Git và shell phổ biến, cùng đường dẫn khi ngữ cảnh hỗ trợ. Trên Windows, ngữ cảnh mặc định theo PowerShell. Nhập tiền tố `cmd /c` hoặc `wsl --exec` để nhận gợi ý lệnh CMD hoặc Bash. Trên Linux, ngữ cảnh mặc định là Bash. Gợi ý dùng dữ liệu cục bộ có giới hạn.
+
+Để dùng lại lịch sử lệnh CNL đủ điều kiện sau khi khởi động lại, chạy `cnl tui --persist-history`. Khi thoát terminal, CLI lưu tối đa 100 lệnh đủ điều kiện trong `tui-history.json` của hồ sơ đang chọn. Lệnh native an toàn có thể gọi lại trong phiên. Lịch sử lưu trên đĩa loại bỏ đối số tùy ý, đường dẫn và thông tin xác thực.
 
 ## Gợi ý lệnh trên shell
 

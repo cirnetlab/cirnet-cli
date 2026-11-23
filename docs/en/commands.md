@@ -35,6 +35,7 @@ The rest of this reference uses `cnl`. If it is not on PATH, call the executable
 | `--profile <NAME>` | Select a profile. Default `windows-x64`. Use letters, digits, hyphens or underscores. Use the same workspace, state directory and profile for all steps in one lifecycle. |
 | `--json` | Write the structured report to stdout. Subprocess progress on stdout is suppressed in this mode. Subprocess diagnostics stay on stderr. |
 | `--lang en\|vi` | Select the CLI and interactive terminal language. Default `en`. |
+| `--persist-history` | Save eligible CNL history for the selected TUI profile. History stays in memory by default. |
 | `-h`, `--help` | Show help for the selected command. |
 | `-V`, `--version` | Show the CLI version at the top level. |
 
@@ -114,11 +115,15 @@ cnl verify --repo cli
 
 ## Interactive terminal
 
-Use the arrows to navigate, `/` to filter the menu, `:` to enter a command, Tab or Shift+Tab to cycle completions, and `?` to show help. Ctrl+R searches command history. Page Up and Page Down scroll output, Ctrl+F searches it, and F3 advances to the next match. Type `clear` in the TUI to clear the output view. Esc goes back or cancels a cancellable command. Use `cnl stop` for runtime shutdown. Set `NO_COLOR=1` before starting the TUI for monochrome output.
+Use the arrows to navigate, `/` to filter the menu, `:` to enter a command, Tab or Shift+Tab to cycle completions, and `?` to show help. In the command field, Up and Down recall eligible commands. Ctrl+R finds earlier entries matching the current prefix. Esc leaves history and restores the draft. Page Up and Page Down scroll output, Ctrl+F searches it, and F3 advances to the next match. Type `clear` in the TUI to clear the output view. Use `cnl stop` for runtime shutdown.
 
-Hover over a suggestion to highlight it. Click to insert it at the cursor and press Enter to run the command. Right-click or press Shift+F10 to open the context menu. Enter `cnl --lang vi` or `cnl --lang en` to switch languages in place. Set `CNL_REDUCED_MOTION=1` to disable the activity spinner.
+Hover over a suggestion to highlight it. Click to insert it at the cursor and press Enter to run the command. Right-click or press Shift+F10 to open the context menu. Press F8 to switch between English and Vietnamese while keeping the active draft and output. You can also enter `cnl --lang vi` or `cnl --lang en`. The input border animates on compatible True Color terminals. Set `CNL_REDUCED_MOTION=1` to disable the animation and spinner, or `NO_COLOR=1` for monochrome output.
 
 Enter native commands directly, such as `git status` or `Get-ChildItem | Select-Object -First 5` on Windows. Each prompt command runs in a separate process. Use `cnl shell` when you want working directory or environment changes to persist through multiple native commands. Type `exit` in that shell to return to the TUI.
+
+The TUI suggests local Git branches, known Git and shell options, and paths where supported. On Windows it follows PowerShell by default. Use an explicit `cmd /c` or `wsl --exec` prefix for CMD or Bash command suggestions. On Linux the default shell context is Bash. Suggestions use bounded local metadata.
+
+To reuse eligible CNL history across launches, start with `cnl tui --persist-history`. The CLI saves up to 100 eligible commands in `tui-history.json` under the selected profile when the terminal exits. Safe native commands can be recalled during the session. Arbitrary arguments, paths and credentials are excluded from stored history.
 
 ## Shell completion
 

@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::{
-    localization::message,
+    localization::{self, Diagnostic, message, text},
     process::{capture, isolate_git, run},
 };
 
@@ -102,11 +102,13 @@ pub struct Workspace {
 
 pub fn canonical(path: &Path) -> Result<PathBuf> {
     let absolute = path.canonicalize().with_context(|| {
-        format!(
-            "{} {}",
-            message(["Cannot resolve", "Không thể phân giải"]),
-            path.display()
-        )
+        Diagnostic::new(|vi| {
+            format!(
+                "{} {}",
+                text(localization::PATH_RESOLUTION_FAILED, vi),
+                path.display()
+            )
+        })
     })?;
     let Some(text) = absolute.to_str() else {
         return Ok(absolute);
@@ -145,13 +147,7 @@ impl Workspace {
                 });
             }
         }
-        bail!(
-            "{}",
-            message([
-                "Could not find the CIRNETLAB workspace. Set --workspace <directory> or CNL_WORKSPACE.",
-                "Không tìm thấy workspace CIRNETLAB. Đặt --workspace <thư-mục> hoặc CNL_WORKSPACE."
-            ])
-        )
+        bail!("{}", message(localization::WORKSPACE_MISSING))
     }
 
     pub fn path(&self, repo: Repo) -> PathBuf {
@@ -161,29 +157,28 @@ impl Workspace {
     pub fn require(&self, repo: Repo) -> Result<PathBuf> {
         let path = self.path(repo);
         let metadata = fs::symlink_metadata(&path).with_context(|| {
-            format!(
-                "{} {}",
-                message(["Checkout missing:", "Thiếu checkout tại"]),
-                path.display()
-            )
+            Diagnostic::new(|vi| {
+                format!(
+                    "{} {}",
+                    text(localization::CHECKOUT_MISSING, vi),
+                    path.display()
+                )
+            })
         })?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            bail!(
+            bail!(Diagnostic::new(|vi| format!(
                 "{} {}",
-                message(["Expected a real checkout:", "Cần checkout Git thực tại"]),
+                text(localization::CHECKOUT_REQUIRED, vi),
                 path.display()
-            );
+            )));
         }
         let root = capture(git(&path).args(["rev-parse", "--show-toplevel"]))?;
         if canonical(Path::new(&root))? != canonical(&path)? {
-            bail!(
+            bail!(Diagnostic::new(|vi| format!(
                 "{} {}",
                 path.display(),
-                message([
-                    "is not an independent Git checkout",
-                    "không phải checkout Git độc lập"
-                ])
-            );
+                text(localization::CHECKOUT_NOT_INDEPENDENT, vi)
+            )));
         }
         Ok(path)
     }
@@ -203,7 +198,11 @@ impl Workspace {
                     let dependencies = repo.dependencies().iter().map(|dependency| {
                         json!({"repo": dependency.name(), "present": self.require(*dependency).is_ok() })
                     }).collect::<Vec<_>>();
-                    result["branch"] = json!(if branch.is_empty() { "detached" } else { &branch });
+                    result["branch"] = if branch.is_empty() {
+                        localization::report_message(localization::REPO_DETACHED_HEAD)
+                    } else {
+                        json!(branch)
+                    };
                     result["revision"] = json!(revision);
                     result["changes"] = json!(changes.lines().collect::<Vec<_>>());
                     result["remotes"] = json!(remotes);
@@ -213,7 +212,8 @@ impl Workspace {
             })();
             result.unwrap_or_else(|error| json!({
                 "repo": repo.name(), "key": repo.key(), "path": path,
-                "state": if path.exists() {"invalid"} else {"missing"}, "detail": error.to_string()
+                "state": if path.exists() {"invalid"} else {"missing"},
+                "detail": localization::report_diagnostic(&error)
             }))
         }).collect()
     }
@@ -226,10 +226,7 @@ impl Workspace {
                 if fs::symlink_metadata(&path).is_ok() {
                     bail!(
                         "{} {}",
-                        message([
-                            "Clone destination already exists:",
-                            "Đường dẫn clone đã tồn tại"
-                        ]),
+                        message(localization::CLONE_DESTINATION_EXISTS),
                         path.display()
                     );
                 }
@@ -237,14 +234,7 @@ impl Workspace {
             }
             let path = self.require(repo)?;
             if !capture(git(&path).args(["status", "--porcelain=v1"]))?.is_empty() {
-                bail!(
-                    "{} {}",
-                    repo.name(),
-                    message([
-                        "has local changes. Commit or stash them before updating.",
-                        "có thay đổi cục bộ. Hãy commit hoặc stash trước khi cập nhật."
-                    ])
-                );
+                bail!("{} {}", repo.name(), message(localization::CHECKOUT_DIRTY));
             }
             let branch = capture(git(&path).args(["branch", "--show-current"]))?;
             let mut key = format!("branch.{branch}.remote");
@@ -253,10 +243,7 @@ impl Workspace {
                 bail!(
                     "{} {}",
                     repo.name(),
-                    message([
-                        "must be on a branch tracking origin",
-                        "phải ở nhánh theo dõi origin"
-                    ])
+                    message(localization::CHECKOUT_BRANCH_ORIGIN)
                 );
             }
             self.verify_origin(repo, &path)?;
@@ -265,7 +252,7 @@ impl Workspace {
                 bail!(
                     "{} {}",
                     repo.name(),
-                    message(["has no branch upstream", "chưa có nhánh upstream"])
+                    message(localization::CHECKOUT_UPSTREAM_MISSING)
                 );
             }
         }
@@ -313,10 +300,7 @@ impl Workspace {
             bail!(
                 "{} {}",
                 repo.name(),
-                message([
-                    "origin is not the expected CIRNETLAB repository",
-                    "có origin khác repo CIRNETLAB đã định"
-                ])
+                message(localization::CHECKOUT_ORIGIN_MISMATCH)
             );
         }
         Ok(())

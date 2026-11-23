@@ -1,8 +1,9 @@
 use std::cell::Cell;
+#[cfg(windows)]
 use std::io;
 use std::process::{Command, Stdio};
 
-use crate::localization::{START_FAILED, message};
+use crate::localization::{self, Diagnostic, START_FAILED, message, text};
 use anyhow::{Context, Result, bail};
 
 thread_local! {
@@ -11,6 +12,10 @@ thread_local! {
 
 pub(crate) fn set_json_output(enabled: bool) {
     JSON_OUTPUT.set(enabled);
+}
+
+pub(crate) fn json_output() -> bool {
+    JSON_OUTPUT.get()
 }
 
 fn redact_sensitive_line(line: &str) -> &str {
@@ -150,23 +155,25 @@ pub(crate) fn isolate_git(command: &mut Command) {
 pub fn capture(command: &mut Command) -> Result<String> {
     let label = command.get_program().to_string_lossy().into_owned();
     let result = command
+        .env_remove("CNL_TUI_REPORT")
         .output()
-        .with_context(|| format!("{} {label}", message(START_FAILED)))?;
+        .with_context(|| Diagnostic::new(|vi| format!("{} {label}", text(START_FAILED, vi))))?;
     if !result.status.success() {
         let diagnostic = String::from_utf8_lossy(&result.stderr);
-        bail!(
+        bail!(Diagnostic::new(|vi| format!(
             "{label} {} {} · {}",
-            message(["exited with", "đã thoát với"]),
+            text(localization::PROCESS_EXITED, vi),
             result.status,
             diagnostic.trim()
-        );
+        )));
     }
     Ok(String::from_utf8(result.stdout)?.trim().to_owned())
 }
 
 pub fn run(command: &mut Command) -> Result<()> {
     let label = command.get_program().to_string_lossy().into_owned();
-    if JSON_OUTPUT.get() {
+    command.env_remove("CNL_TUI_REPORT");
+    if json_output() {
         // stdout is reserved for the CLI's single structured report.
         command.stdout(Stdio::null());
     }
@@ -174,10 +181,7 @@ pub fn run(command: &mut Command) -> Result<()> {
         .status()
         .with_context(|| format!("{} {label}", message(START_FAILED)))?;
     if !status.success() {
-        bail!(
-            "{label} {} {status}",
-            message(["exited with", "đã thoát với"])
-        );
+        bail!("{label} {} {status}", message(localization::PROCESS_EXITED));
     }
     Ok(())
 }
@@ -223,10 +227,8 @@ pub fn isolate_stdio() -> Result<()> {
                 && handle != INVALID_HANDLE_VALUE
                 && unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0
             {
-                return Err(io::Error::last_os_error()).context(crate::localization::message([
-                    "Cannot isolate the caller's standard handles",
-                    "Không thể cô lập các handle chuẩn của tiến trình gọi",
-                ]));
+                return Err(io::Error::last_os_error())
+                    .context(message(localization::STDIO_ISOLATION_FAILED));
             }
         }
     }

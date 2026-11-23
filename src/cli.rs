@@ -1,7 +1,7 @@
 pub(crate) mod catalog;
 pub(crate) mod native;
 
-use std::{io::IsTerminal, path::PathBuf};
+use std::{fmt::Write as _, io::IsTerminal, path::PathBuf};
 
 use anyhow::{Result, bail};
 use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command, value_parser};
@@ -10,23 +10,19 @@ use serde_json::{Value, json};
 use crate::{
     build,
     environment::{self, State},
-    localization::{message, report_field, set_language},
+    localization::{self, message, set_language},
     runtime, tui,
     workspace::{Repo, Workspace},
 };
 
-fn flag(name: &'static str, help: &'static str) -> Arg {
-    Arg::new(name)
-        .long(name)
-        .action(ArgAction::SetTrue)
-        .help(help)
+fn flag(name: &'static str) -> Arg {
+    Arg::new(name).long(name).action(ArgAction::SetTrue)
 }
 
-fn path(name: &'static str, help: &'static str) -> Arg {
+fn path(name: &'static str) -> Arg {
     Arg::new(name)
         .long(name)
         .value_parser(value_parser!(PathBuf))
-        .help(help)
 }
 
 fn port(name: &'static str) -> Arg {
@@ -50,24 +46,22 @@ fn desktop() -> Arg {
     Arg::new("desktop")
         .long("desktop")
         .value_parser(runtime::Target::VALUES)
-        .help("Select the Interface desktop target")
 }
 
 fn runtime_args(name: &'static str, modes: &'static [&'static str]) -> Command {
     ports(
         Command::new(name).args([
-            path("receipt", "Remote assembly-result.json"),
+            path("receipt"),
             desktop(),
             Arg::new("mode")
                 .long("mode")
                 .value_parser(clap::builder::PossibleValuesParser::new(
                     modes.iter().copied(),
                 ))
-                .default_value("development")
-                .help("Choose the Interface runtime mode"),
-            flag("initialize-db", "Initialize a new local SQLite database"),
-            flag("open", "Open the application after readiness"),
-            flag("dry-run", "Preview without applying"),
+                .default_value("development"),
+            flag("initialize-db"),
+            flag("open"),
+            flag("dry-run"),
         ]),
     )
 }
@@ -77,122 +71,84 @@ pub fn app() -> Command {
 }
 
 pub(crate) fn app_for(vi: bool) -> Command {
-    let repo_change = |operation, help| {
+    let repo_change = |operation| {
         Command::new(operation)
-            .about(help)
             .arg(Arg::new("targets").num_args(1..).value_parser(Repo::KEYS))
-            .arg(flag("all", "Select every repository in the workspace"))
+            .arg(flag("all"))
             .group(
                 ArgGroup::new("scope")
                     .args(["targets", "all"])
                     .required(true),
             )
-            .arg(flag(
-                "dry-run",
-                "Check the selected operations without applying",
-            ))
+            .arg(flag("dry-run"))
     };
     catalog::localize(
         Command::new("cnl")
             .version(env!("CARGO_PKG_VERSION"))
-            .about("CIRNETLAB native development tools")
             .args([
-                path(
-                    "workspace",
-                    "Root containing the independent CIRNETLAB repositories",
-                )
-                .global(true),
-                path(
-                    "state-dir",
-                    "Absolute external directory for state and artifacts",
-                )
-                .global(true),
+                path("workspace").global(true),
+                path("state-dir").global(true),
                 Arg::new("profile")
                     .long("profile")
                     .global(true)
                     .default_value("windows-x64"),
-                flag("json", "Emit a JSON report on stdout").global(true),
+                flag("json").global(true),
+                flag("persist-history").global(true),
                 Arg::new("lang")
                     .long("lang")
                     .value_parser(["en", "vi"])
                     .default_value("en")
-                    .help("Terminal language")
                     .global(true),
             ])
             .subcommands([
-                Command::new("tui").about("Open the CIRNETLAB terminal"),
-                Command::new("doctor").about("Inspect the Windows x64 toolchain"),
-                Command::new("env")
-                    .about("Show, validate or update local profiles")
-                    .subcommands([
-                        Command::new("show"),
-                        Command::new("check"),
-                        ports(Command::new("set").arg(flag("dry-run", "Preview profile changes"))),
-                    ]),
-                Command::new("setup")
-                    .about("Prepare profile directories and optional Chromium")
-                    .args([
-                        flag(
-                            "browser",
-                            "Install the selected candidate's Chromium for testing",
-                        ),
-                        path("receipt", "Remote assembly-result.json"),
-                        flag("dry-run", "Preview workspace preparation"),
-                    ]),
+                Command::new("tui"),
+                Command::new("doctor"),
+                Command::new("env").subcommands([
+                    Command::new("show"),
+                    Command::new("check"),
+                    ports(Command::new("set").arg(flag("dry-run"))),
+                ]),
+                Command::new("setup").args([flag("browser"), path("receipt"), flag("dry-run")]),
                 Command::new("repos")
-                    .about("Manage the independent checkouts")
                     .subcommand_required(true)
                     .subcommands([
-                        Command::new("discover").about("List expected repository locations"),
-                        Command::new("status")
-                            .about("Report branches, changes, remotes and dependencies"),
-                        repo_change("clone", "Clone explicitly selected missing checkouts"),
-                        repo_change("update", "Fast-forward explicitly selected clean checkouts"),
+                        Command::new("discover"),
+                        Command::new("status"),
+                        repo_change("clone"),
+                        repo_change("update"),
                     ]),
                 Command::new("build")
-                    .about("Build selected components or the complete native system")
                     .group(ArgGroup::new("scope").args(["all", "repo"]).required(true))
                     .args([
-                        flag("all", "Build the full Windows x64 candidate"),
+                        flag("all"),
                         selected(),
-                        flag("offline", "Use cached dependency inputs"),
-                        flag("dry-run", "Preview build order"),
-                        path("receipt", "Existing candidate inputs for Interface or RTL"),
-                        path("fpga-toolchain", "Pinned RTL toolchain root"),
+                        flag("offline"),
+                        flag("dry-run"),
+                        path("receipt"),
+                        path("fpga-toolchain"),
                     ]),
                 runtime_args("run", &["development", "packaged"]),
                 runtime_args("dev", &["development"]).hide(true),
-                Command::new("status").about("Check the owned supervisor, API, RPC and UI"),
-                Command::new("stop")
-                    .about("Stop the owned application gracefully")
-                    .arg(desktop())
-                    .arg(flag("dry-run", "Preview the owned Stop operation")),
+                Command::new("status"),
+                Command::new("stop").arg(desktop()).arg(flag("dry-run")),
                 Command::new("logs").args([
                     Arg::new("service")
                         .long("service")
                         .value_parser(["native", "vite"])
-                        .default_value("native")
-                        .help("Select the runtime log"),
+                        .default_value("native"),
                     Arg::new("lines")
                         .long("lines")
                         .value_parser(value_parser!(u16).range(1..=500))
-                        .default_value("60")
-                        .help("Maximum number of lines to show"),
+                        .default_value("60"),
                 ]),
-                Command::new("shell").arg(
-                    Arg::new("shell")
-                        .value_parser(native::SHELLS)
-                        .help("Select a native shell"),
-                ),
-                Command::new("verify")
-                    .about("Run native integration checks or selected component tests")
-                    .args([
-                        path("receipt", "Remote assembly-result.json"),
-                        selected(),
-                        path("browser-cache", "Absolute Playwright Chromium directory"),
-                        path("fpga-toolchain", "Pinned RTL toolchain root"),
-                        flag("dry-run", "Preview verification"),
-                    ]),
+                Command::new("shell").arg(Arg::new("shell").value_parser(native::SHELLS)),
+                Command::new("verify").args([
+                    path("receipt"),
+                    selected(),
+                    path("browser-cache"),
+                    path("fpga-toolchain"),
+                    flag("dry-run"),
+                ]),
             ])
             .subcommand(super::tui::completion::command())
             .subcommand(super::tui::completion::query_command()),
@@ -203,7 +159,19 @@ pub(crate) fn app_for(vi: bool) -> Command {
 pub fn run() -> Result<()> {
     let vi = crate::localization::requested_language(std::env::args_os());
     set_language(vi);
-    let matches = app_for(vi).get_matches();
+    let matches = match app_for(vi).try_get_matches() {
+        Ok(matches) => matches,
+        Err(error) if !vi => error.exit(),
+        Err(error) => {
+            let output = parse_error(&error, vi);
+            if error.use_stderr() {
+                eprint!("{output}");
+            } else {
+                print!("{output}");
+            }
+            std::process::exit(error.exit_code());
+        }
+    };
     if let Some((name, args)) = matches.subcommand() {
         match name {
             "completion" => return tui::completion::emit(args),
@@ -213,16 +181,7 @@ pub fn run() -> Result<()> {
                     || !std::io::stdin().is_terminal()
                     || !std::io::stdout().is_terminal()
                 {
-                    bail!(
-                        "{}",
-                        catalog::text(
-                            [
-                                "Open a native shell from an interactive terminal.",
-                                "Mở shell native từ terminal tương tác."
-                            ],
-                            vi
-                        )
-                    );
+                    bail!("{}", catalog::text(localization::SHELL_INTERACTIVE, vi));
                 }
                 let status =
                     native::interactive(args.get_one::<String>("shell").map(String::as_str))?;
@@ -242,13 +201,7 @@ pub fn run() -> Result<()> {
             || !std::io::stdin().is_terminal()
             || !std::io::stdout().is_terminal()
         {
-            bail!(
-                "{}",
-                message([
-                    "Select a command in non-interactive mode. See cnl --help.",
-                    "Hãy chọn một lệnh khi chạy ở chế độ không tương tác. Xem cnl --help."
-                ])
-            );
+            bail!("{}", message(localization::COMMAND_REQUIRED));
         }
         return tui::open(&workspace, &matches);
     };
@@ -267,13 +220,7 @@ pub fn run() -> Result<()> {
         let ok = report["ok"] == true;
         display(report, matches.get_flag("json"), vi)?;
         if !ok {
-            bail!(
-                "{}",
-                message([
-                    "Toolchain prerequisites are incomplete",
-                    "Chưa đủ điều kiện toolchain"
-                ])
-            );
+            bail!("{}", message(localization::TOOLCHAIN_INCOMPLETE));
         }
         return Ok(());
     }
@@ -306,13 +253,7 @@ pub fn run() -> Result<()> {
             if !arguments.get_flag("dry-run") {
                 let checks = environment::doctor(&workspace);
                 if checks["ok"] != true {
-                    bail!(
-                        "{}",
-                        message([
-                            "Fix the prerequisites reported by cnl doctor before setup",
-                            "Hãy xử lý các điều kiện do cnl doctor báo trước khi chạy setup"
-                        ])
-                    );
+                    bail!("{}", message(localization::SETUP_PREREQUISITES));
                 }
                 let _lock = state.lock()?;
                 if browser {
@@ -400,55 +341,138 @@ fn update_ports(state: &mut State, input: &ArgMatches) -> Result<()> {
     state.profile.validate()
 }
 
+pub(crate) const TUI_REPORT_MARKER: &str = "CNL_TUI_REPORT ";
+
 fn display(value: Value, json_output: bool, vi: bool) -> Result<()> {
     if json_output {
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else if let Some(content) = value["content"].as_str() {
         println!("{content}");
-    } else if let Some(url) = value["url"].as_str() {
-        let state = value["state"].as_str().unwrap_or("unknown");
-        let status = match state {
-            "ready" => catalog::text(["Ready", "Sẵn sàng"], vi),
-            "unhealthy" => catalog::text(["Unhealthy", "Dịch vụ gặp lỗi"], vi),
-            "exited-without-confirmed-stop" => catalog::text(
-                [
-                    "Exited without confirmed Stop",
-                    "Đã thoát trước khi xác nhận Stop",
-                ],
-                vi,
-            ),
-            _ => state,
-        };
-        let mode = match value["mode"].as_str() {
-            Some("development") => catalog::text(["development", "phát triển"], vi),
-            Some("packaged") => catalog::text(["packaged", "đóng gói"], vi),
-            Some(mode) => mode,
-            None => "",
-        };
-        println!("{status} · Interface ({mode}) · {url}");
-        if let Some(port) = value["ports"]["hardware_port"].as_u64() {
-            println!(
-                "{} · 127.0.0.1:{port}",
-                catalog::text(["Hardware RPC", "Hardware RPC"], vi)
-            );
-        }
-        if let Some(path) = value["logDirectory"].as_str() {
-            println!("{} · {path}", catalog::text(["Logs", "Nhật ký"], vi));
-        }
-    } else if value["state"] == "stopped" {
-        println!("{}", catalog::text(["Stopped", "Đã dừng"], vi));
-        if let Some(path) = value["logDirectory"].as_str() {
-            println!("{} · {path}", catalog::text(["Logs", "Nhật ký"], vi));
-        }
+    } else if let Some(nonce) = localization::tui_report_nonce() {
+        println!(
+            "{TUI_REPORT_MARKER}{nonce} {}",
+            serde_json::to_string(&value)?
+        );
     } else {
-        for (label, item) in value.as_object().into_iter().flatten() {
-            let label = report_field(label, vi);
-            if let Some(text) = item.as_str() {
-                println!("{label}: {text}");
-            } else {
-                println!("{label}: {}", serde_json::to_string_pretty(item)?);
-            }
-        }
+        println!("{}", human_report(&value, vi));
     }
     Ok(())
+}
+
+pub(crate) fn human_report(value: &Value, vi: bool) -> String {
+    let mut output = String::new();
+    render_report(&mut output, value, "", 0, vi);
+    output.pop();
+    output
+}
+
+fn render_report(output: &mut String, value: &Value, key: &str, indent: usize, vi: bool) {
+    let lookup = |label| localization::text(label, vi);
+    if let Some(detail) = localization::human_detail(value, vi) {
+        let _ = writeln!(output, "{detail}");
+        return;
+    }
+    match value {
+        Value::Object(fields) if !fields.is_empty() => {
+            for (key, value) in fields {
+                let label = localization::report_field(key).map_or(key.as_str(), lookup);
+                let _ = write!(output, "{:indent$}{label}:", "");
+                if report_section(value) {
+                    output.push('\n');
+                } else {
+                    output.push(' ');
+                }
+                render_report(output, value, key, indent + 2, vi);
+            }
+        }
+        Value::Array(items) if !items.is_empty() => {
+            for (index, item) in items.iter().enumerate() {
+                if report_section(item) {
+                    if index > 0 {
+                        output.push('\n');
+                    }
+                } else {
+                    let _ = write!(output, "{:indent$}- ", "");
+                }
+                render_report(output, item, key, indent, vi);
+            }
+        }
+        Value::String(value) => {
+            let value = localization::report_value(key, value).map_or(value.as_str(), lookup);
+            let _ = writeln!(output, "{value}");
+        }
+        Value::Bool(value) => {
+            let _ = writeln!(
+                output,
+                "{}",
+                lookup(localization::report_boolean(key, *value))
+            );
+        }
+        Value::Number(value) => {
+            let _ = writeln!(output, "{value}");
+        }
+        Value::Null | Value::Array(_) | Value::Object(_) => output.push_str("—\n"),
+    }
+}
+
+fn report_section(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => {
+            !fields.is_empty() && localization::human_detail(value, false).is_none()
+        }
+        Value::Array(items) => !items.is_empty(),
+        _ => false,
+    }
+}
+
+pub(crate) fn parse_error(error: &clap::Error, vi: bool) -> String {
+    if vi {
+        localization::clap_diagnostic(error)
+    } else {
+        error.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_report_translates_only_owned_report_values() {
+        let value = json!({
+            "repositories": [
+                {
+                    "branch": "detached",
+                    "detail": "Could not start a tool",
+                    "changes": ["A  input development.log"],
+                    "state": "checkout"
+                }
+            ],
+            "mode": "development",
+            "native": {
+                "healthy": false,
+                "hardwareRpc": true,
+                "hardwareDetail": "upstream detail: ready"
+            },
+            "url": "http://127.0.0.1:8000/"
+        });
+        let vi = human_report(&value, true);
+        for unchanged in [
+            "detached",
+            "Could not start a tool",
+            "A  input development.log",
+            "upstream detail: ready",
+            "http://127.0.0.1:8000/",
+        ] {
+            assert!(vi.contains(unchanged));
+        }
+        for localized in [
+            "Có checkout",
+            "Phát triển",
+            "Dịch vụ gặp lỗi",
+            "Hardware RPC: ĐẠT",
+        ] {
+            assert!(vi.contains(localized));
+        }
+    }
 }

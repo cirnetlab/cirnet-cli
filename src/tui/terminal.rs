@@ -90,6 +90,7 @@ pub(super) enum PalettePart {
     InputRim,
     InputEdge,
     Input,
+    InputGlow(u8),
     SuggestionEdge,
     Detail,
     Suggestion,
@@ -139,6 +140,10 @@ impl SemanticDepth {
             Self::Indexed => Color::AnsiValue(index),
             Self::Basic => basic,
         }
+    }
+
+    fn allows_input_animation(self, color: bool, interactive: bool, reduced_motion: bool) -> bool {
+        matches!(self, Self::Rgb) && color && interactive && !reduced_motion
     }
 }
 
@@ -215,6 +220,17 @@ impl Style {
         let (color, background) = match part {
             InputRim => (input_rim, None),
             InputEdge => (input_rim, None),
+            InputGlow(strength) => {
+                let rgb = match strength {
+                    6 => (255, 192, 143),
+                    5 => (226, 146, 97),
+                    4 => (194, 119, 80),
+                    3 => (157, 100, 76),
+                    2 => (124, 84, 73),
+                    _ => (97, 79, 77),
+                };
+                (depth.color(rgb, 240, DarkGrey), None)
+            }
             // A box-drawing cell cannot combine a third color outside its
             // stroke with a distinct interior background. Inherit the
             // terminal surface for the complete input to keep its rounded
@@ -294,7 +310,7 @@ impl Line {
     }
 
     pub(super) fn select(&mut self, range: Range<usize>) {
-        if range.is_empty() {
+        if range.is_empty() || self.contents().get(range.clone()).is_none() {
             return;
         }
         let mut selected = Self::default();
@@ -436,7 +452,73 @@ pub(super) struct Frame {
     pub(super) menu: Option<MenuRows>,
     pub(super) suggestions: Option<MenuRows>,
     pub(super) input: Option<InputHit>,
-    pub(super) readable: Option<Range<u16>>,
+    pub(super) input_border: Option<InputBorder>,
+    pub(super) readable: Option<Readable>,
+    pub(super) feedback_row: Option<u16>,
+}
+
+pub(super) struct Readable {
+    pub(super) first: u16,
+    pub(super) rows: Vec<SourceRow>,
+    pub(super) inset: usize,
+}
+
+#[derive(Clone)]
+pub(super) struct SourceRow {
+    pub(super) bytes: Range<usize>,
+    pub(super) substituted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct InputBorder {
+    pub(super) left: u16,
+    pub(super) top: u16,
+    pub(super) width: u16,
+}
+
+impl InputBorder {
+    // A clockwise trail. The lightly colored neighbor ahead softens the leading point.
+    const GLOW: [(isize, u8); 8] = [
+        (-6, 1),
+        (-5, 2),
+        (-4, 3),
+        (-3, 4),
+        (-2, 5),
+        (-1, 5),
+        (0, 6),
+        (1, 2),
+    ];
+
+    fn length(self) -> usize {
+        usize::from(self.width) * 2 + 2
+    }
+
+    fn glow(self, phase: usize) -> impl Iterator<Item = (usize, u8)> + Clone {
+        let length = self.length();
+        let phase = (phase % length) as isize;
+        Self::GLOW.into_iter().map(move |(offset, strength)| {
+            (
+                (phase + offset).rem_euclid(length as isize) as usize,
+                strength,
+            )
+        })
+    }
+
+    fn cell(self, index: usize) -> (u16, u16, &'static str, PalettePart) {
+        use PalettePart::{InputEdge, InputRim};
+        let width = usize::from(self.width);
+        let right = self.left + self.width - 1;
+        match index {
+            0 => (self.left, self.top, "╭", InputRim),
+            n if n < width - 1 => (self.left + n as u16, self.top, "─", InputEdge),
+            n if n == width - 1 => (right, self.top, "╮", InputRim),
+            n if n == width => (right, self.top + 1, "│", InputEdge),
+            n if n == width + 1 => (right, self.top + 2, "╯", InputRim),
+            n if n < width * 2 => (right - (n - width - 1) as u16, self.top + 2, "─", InputEdge),
+            n if n == width * 2 => (self.left, self.top + 2, "╰", InputRim),
+            _ => (self.left, self.top + 1, "│", InputEdge),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -455,7 +537,9 @@ impl Frame {
             menu: None,
             suggestions: None,
             input: None,
+            input_border: None,
             readable: None,
+            feedback_row: None,
         }
     }
 
@@ -494,6 +578,7 @@ impl Frame {
 pub(super) struct Painter {
     previous: Option<Frame>,
     depth: SemanticDepth,
+    input_phase: Option<usize>,
 }
 
 impl Default for Painter {
@@ -501,6 +586,7 @@ impl Default for Painter {
         Self {
             previous: None,
             depth: SemanticDepth::detect(),
+            input_phase: None,
         }
     }
 }
@@ -508,6 +594,81 @@ impl Default for Painter {
 impl Painter {
     pub(super) fn last_frame(&self, size: (u16, u16)) -> Option<&Frame> {
         self.previous.as_ref().filter(|frame| frame.size == size)
+    }
+
+    pub(super) fn supports_input_animation(&self, color: bool, interactive: bool) -> bool {
+        self.depth.allows_input_animation(
+            color && color_enabled(),
+            interactive,
+            env::var_os("CNL_REDUCED_MOTION").is_some(),
+        )
+    }
+
+    pub(super) fn has_animated_input(&self, size: (u16, u16)) -> bool {
+        self.last_frame(size)
+            .is_some_and(|frame| frame.input_border.is_some())
+    }
+
+    pub(super) fn animate_input(
+        &mut self,
+        out: &mut impl Write,
+        phase: Option<usize>,
+    ) -> io::Result<()> {
+        let Some(frame) = &self.previous else {
+            return Ok(());
+        };
+        let Some(border) = frame
+            .input_border
+            .filter(|_| matches!(self.depth, SemanticDepth::Rgb))
+        else {
+            return Ok(());
+        };
+        if self.input_phase == phase {
+            return Ok(());
+        }
+        let mut active = Style::default();
+        let previous = self.input_phase.into_iter().flat_map(|p| border.glow(p));
+        let next = phase.into_iter().flat_map(|p| border.glow(p));
+        let mut written = false;
+        for (cell, _) in previous.clone() {
+            if !next.clone().any(|(index, _)| index == cell) {
+                self.paint_input_cell(out, border, cell, None, &mut active)?;
+                written = true;
+            }
+        }
+        for (cell, strength) in next {
+            if !previous.clone().any(|old| old == (cell, strength)) {
+                self.paint_input_cell(out, border, cell, Some(strength), &mut active)?;
+                written = true;
+            }
+        }
+        if written {
+            Style::default().write(out, active)?;
+            if let Some((x, y)) = frame.cursor {
+                queue!(out, MoveTo(x, y))?;
+            }
+            out.flush()?;
+        }
+        self.input_phase = phase;
+        Ok(())
+    }
+
+    fn paint_input_cell(
+        &self,
+        out: &mut impl Write,
+        border: InputBorder,
+        index: usize,
+        strength: Option<u8>,
+        active: &mut Style,
+    ) -> io::Result<()> {
+        let (x, y, glyph, part) = border.cell(index);
+        let tone = Tone::Palette(strength.map_or(part, PalettePart::InputGlow));
+        let next = Style::for_tone(tone, self.depth);
+        queue!(out, MoveTo(x, y))?;
+        next.write(out, *active)?;
+        queue!(out, Print(glyph))?;
+        *active = next;
+        Ok(())
     }
 
     pub(super) fn draw(
@@ -524,11 +685,28 @@ impl Painter {
         }
         let mut changed = initial || resized;
         let mut active = Style::default();
+        let old_border = previous.and_then(|old| old.input_border);
+        if (resized || old_border != frame.input_border)
+            && let Some(phase) = self.input_phase.take()
+            && let Some(border) = old_border.filter(|_| !resized)
+        {
+            for (cell, _) in border.glow(phase) {
+                self.paint_input_cell(out, border, cell, None, &mut active)?;
+            }
+            changed = true;
+        }
+        let glowing = frame.input_border.zip(self.input_phase);
         for (y, line) in frame.changed_rows(previous) {
             let old = previous
                 .filter(|_| !resized)
                 .map(|old| &old.rows[usize::from(y)]);
             let (column, dirty) = line.damage(old);
+            let covered = glowing
+                .filter(|(border, _)| (border.top..=border.top + 2).contains(&y))
+                .map(|(border, phase)| {
+                    let end = column + line.contents()[dirty.clone()].width() as u16;
+                    (border, phase, column..end)
+                });
             queue!(out, MoveTo(column, y))?;
             if color || line.segments().any(|(tone, _)| tone == Tone::Selection) {
                 let mut offset = 0;
@@ -574,6 +752,14 @@ impl Painter {
                         let count = stale.min(BLANKS.len());
                         queue!(out, Print(&BLANKS[..count]))?;
                         stale -= count;
+                    }
+                }
+            }
+            if let Some((border, phase, columns)) = covered {
+                for (cell, strength) in border.glow(phase) {
+                    let (x, row, _, _) = border.cell(cell);
+                    if row == y && columns.contains(&x) {
+                        self.paint_input_cell(out, border, cell, Some(strength), &mut active)?;
                     }
                 }
             }
@@ -674,6 +860,86 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "{output:?}");
         true
+    }
+
+    #[test]
+    fn copper_glow_moves_with_only_border_cell_damage() {
+        if ran_in_ansi_fixture("copper_glow_moves_with_only_border_cell_damage") {
+            return;
+        }
+        use crate::tui::{Input, Menu, view};
+
+        let mut menu = Menu::new(true);
+        menu.open_prompt(Input::at_end("run --desk".into()));
+        let size = (180, 30);
+        let mut painter = Painter {
+            previous: None,
+            depth: SemanticDepth::Rgb,
+            input_phase: None,
+        };
+        let mut bytes = Vec::new();
+        painter
+            .draw(&mut bytes, view::frame(&mut menu, size, true, true), true)
+            .unwrap();
+        let initial_bytes = bytes.len();
+        assert!(painter.has_animated_input(size));
+        let border = painter.last_frame(size).unwrap().input_border.unwrap();
+        assert!(border.width > 100);
+        let changed_cells = |bytes: &[u8]| {
+            let trace = std::str::from_utf8(bytes).unwrap();
+            assert!(
+                !trace.contains("--desk")
+                    && !trace.contains("\x1b[2J")
+                    && !trace.contains("\x1b[K"),
+                "{trace:?}"
+            );
+            assert!(
+                !trace.contains("\x1b[?25h") && !trace.contains("\x1b[?25l"),
+                "{trace:?}"
+            );
+            trace.chars().filter(|ch| "╭─╮│╰╯".contains(*ch)).count()
+        };
+        let phase = usize::from(border.width) - 1;
+        bytes.clear();
+        painter.animate_input(&mut bytes, Some(phase)).unwrap();
+        assert_eq!(changed_cells(&bytes), 8);
+        assert!(
+            std::str::from_utf8(&bytes)
+                .unwrap()
+                .contains("\x1b[38;2;255;192;143m╮")
+        );
+        bytes.clear();
+        painter.animate_input(&mut bytes, Some(phase + 2)).unwrap();
+        assert_eq!(changed_cells(&bytes), 10);
+        eprintln!(
+            "180×30 first frame {initial_bytes} bytes; steady glow tick {} bytes, 10 cells",
+            bytes.len()
+        );
+        bytes.clear();
+        painter.animate_input(&mut bytes, Some(phase + 2)).unwrap();
+        assert!(bytes.is_empty());
+        painter.animate_input(&mut bytes, None).unwrap();
+        assert_eq!(changed_cells(&bytes), 8);
+        assert!(!std::str::from_utf8(&bytes).unwrap().contains("255;192;143"));
+        bytes.clear();
+        painter
+            .draw(
+                &mut bytes,
+                view::frame(&mut menu, (17, 3), true, true),
+                true,
+            )
+            .unwrap();
+        assert!(!painter.has_animated_input((17, 3)));
+    }
+
+    #[test]
+    fn glow_requires_rgb_interactive_color_and_motion() {
+        assert!(SemanticDepth::Rgb.allows_input_animation(true, true, false));
+        assert!(!SemanticDepth::Rgb.allows_input_animation(false, true, false));
+        assert!(!SemanticDepth::Rgb.allows_input_animation(true, false, false));
+        assert!(!SemanticDepth::Rgb.allows_input_animation(true, true, true));
+        assert!(!SemanticDepth::Indexed.allows_input_animation(true, true, false));
+        assert!(!SemanticDepth::Basic.allows_input_animation(true, true, false));
     }
 
     #[test]
@@ -822,6 +1088,15 @@ mod tests {
     }
 
     #[test]
+    fn selection_from_an_older_language_cannot_split_a_utf8_character() {
+        let mut line = Line::default();
+        line.push(Tone::Plain, "Đã chạy");
+        line.select(1..3);
+        assert_eq!(line.contents(), "Đã chạy");
+        assert!(!line.has(Tone::Selection));
+    }
+
+    #[test]
     fn same_color_is_emitted_once_across_updated_rows() {
         if ran_in_ansi_fixture("same_color_is_emitted_once_across_updated_rows") {
             return;
@@ -839,6 +1114,7 @@ mod tests {
         let mut painter = Painter {
             previous: None,
             depth: SemanticDepth::Rgb,
+            input_phase: None,
         };
         let mut bytes = Vec::new();
         painter.draw(&mut bytes, frame("1"), true).unwrap();
@@ -942,6 +1218,7 @@ mod tests {
         let mut painter = Painter {
             previous: None,
             depth: SemanticDepth::Rgb,
+            input_phase: None,
         };
         let mut bytes = Vec::new();
         painter.draw(&mut bytes, frame, true).unwrap();

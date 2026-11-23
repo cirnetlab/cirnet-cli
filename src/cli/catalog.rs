@@ -1,3 +1,5 @@
+use crate::localization;
+
 pub(crate) use crate::localization::{Localized, text};
 
 pub(crate) struct Entry {
@@ -9,125 +11,86 @@ pub(crate) struct Entry {
 
 pub(crate) const ENTRIES: &[Entry] = &[
     Entry {
-        label: ["Diagnostics", "Chẩn đoán"],
-        detail: [
-            "Inspect the installed toolchains and runtime prerequisites.",
-            "Kiểm tra toolchain và các điều kiện để chạy hệ thống.",
-        ],
+        label: localization::MENU_DOCTOR_LABEL,
+        detail: localization::MENU_DOCTOR_DETAIL,
         command: "doctor",
         recommendation: None,
     },
     Entry {
-        label: ["Environment", "Môi trường"],
-        detail: [
-            "Review the selected profile and its local ports.",
-            "Xem hồ sơ đang chọn và các cổng cục bộ.",
-        ],
+        label: localization::MENU_ENV_LABEL,
+        detail: localization::MENU_ENV_DETAIL,
         command: "env",
         recommendation: Some("show"),
     },
     Entry {
-        label: ["Development setup", "Thiết lập phát triển"],
-        detail: [
-            "Prepare a development profile and optional Chromium.",
-            "Chuẩn bị hồ sơ phát triển và Chromium nếu cần.",
-        ],
+        label: localization::MENU_SETUP_LABEL,
+        detail: localization::MENU_SETUP_DETAIL,
         command: "setup",
         recommendation: Some("--browser"),
     },
     Entry {
-        label: ["Repositories", "Kho mã nguồn"],
-        detail: [
-            "Discover and inspect the independent CIRNETLAB repositories.",
-            "Tìm và kiểm tra các kho mã nguồn CIRNETLAB.",
-        ],
+        label: localization::MENU_REPOS_LABEL,
+        detail: localization::MENU_REPOS_DETAIL,
         command: "repos",
         recommendation: Some("status"),
     },
     Entry {
-        label: ["Build", "Bản dựng"],
-        detail: [
-            "Build the full native stack or selected components in dependency order.",
-            "Build hệ thống native hoặc thành phần đã chọn theo thứ tự phụ thuộc.",
-        ],
+        label: localization::MENU_BUILD_LABEL,
+        detail: localization::MENU_BUILD_DETAIL,
         command: "build",
         recommendation: Some("--all"),
     },
     Entry {
-        label: ["Run Program", "Chạy chương trình"],
-        detail: [
-            "Start Interface in development mode or choose the packaged build.",
-            "Chạy Interface ở chế độ phát triển hoặc chọn bản đóng gói.",
-        ],
+        label: localization::MENU_RUN_LABEL,
+        detail: localization::MENU_RUN_DETAIL,
         command: "run",
         recommendation: Some("--desktop interface"),
     },
     Entry {
-        label: ["Runtime status", "Trạng thái hệ thống"],
-        detail: [
-            "Show the owned services, health, ports and Interface URL.",
-            "Hiển thị dịch vụ thuộc CLI, tình trạng, cổng và URL Interface.",
-        ],
+        label: localization::MENU_STATUS_LABEL,
+        detail: localization::MENU_STATUS_DETAIL,
         command: "status",
         recommendation: None,
     },
     Entry {
-        label: ["Verification", "Kiểm chứng"],
-        detail: [
-            "Run candidate checks or verify selected components.",
-            "Kiểm chứng ứng viên hoặc các thành phần đã chọn.",
-        ],
+        label: localization::MENU_VERIFY_LABEL,
+        detail: localization::MENU_VERIFY_DETAIL,
         command: "verify",
         recommendation: None,
     },
     Entry {
-        label: ["Stop", "Dừng"],
-        detail: [
-            "Ask the supervisor to shut down the owned application.",
-            "Yêu cầu bộ giám sát dừng ứng dụng do CLI quản lý.",
-        ],
+        label: localization::MENU_STOP_LABEL,
+        detail: localization::MENU_STOP_DETAIL,
         command: "stop",
         recommendation: None,
     },
     Entry {
-        label: ["Runtime logs", "Nhật ký runtime"],
-        detail: [
-            "Read the current or latest owned service log.",
-            "Đọc nhật ký gần nhất của dịch vụ do CLI quản lý.",
-        ],
+        label: localization::MENU_LOGS_LABEL,
+        detail: localization::MENU_LOGS_DETAIL,
         command: "logs",
         recommendation: None,
     },
     Entry {
-        label: ["Native shell", "Shell native"],
-        detail: [
-            "Open a native shell in the current terminal.",
-            "Mở shell native trong terminal hiện tại.",
-        ],
+        label: localization::MENU_SHELL_LABEL,
+        detail: localization::MENU_SHELL_DETAIL,
         command: "shell",
         recommendation: None,
     },
     Entry {
-        label: ["Shell completion", "Gợi ý lệnh trên shell"],
-        detail: [
-            "Generate a shell completion script.",
-            "Tạo script gợi ý lệnh cho shell.",
-        ],
+        label: localization::MENU_COMPLETION_LABEL,
+        detail: localization::MENU_COMPLETION_DETAIL,
         command: "completion",
         recommendation: None,
     },
     Entry {
-        label: ["Command reference", "Tham chiếu lệnh"],
-        detail: [
-            "Show command syntax and available options.",
-            "Hiển thị cú pháp lệnh và các tùy chọn.",
-        ],
+        label: localization::MENU_REFERENCE_LABEL,
+        detail: localization::MENU_REFERENCE_DETAIL,
         command: "--help",
         recommendation: None,
     },
     Entry {
-        label: ["Exit", "Thoát"],
-        detail: ["Close the terminal menu.", "Đóng menu terminal."],
+        label: localization::MENU_EXIT_LABEL,
+        detail: localization::MENU_EXIT_DETAIL,
         command: "",
         recommendation: None,
     },
@@ -149,46 +112,26 @@ pub(crate) fn localize(command: clap::Command, vi: bool) -> clap::Command {
 fn localize_command(mut command: clap::Command, parent: &str, vi: bool) -> clap::Command {
     let name = command.get_name();
     let description = match (parent, name) {
-        ("repos", "status") => Some([
-            "Inspect repository branches, revisions and working trees",
-            "Kiểm tra nhánh, revision và cây làm việc của các repo",
-        ]),
+        ("repos", "status") => Some(localization::COMMAND_REPO_STATUS),
         (_, name) => match name {
-            "cnl" => Some(["CIRNETLAB developer tools", "Công cụ phát triển CIRNETLAB"]),
-            "tui" => Some(["Open the CIRNET LAB terminal", "Mở terminal CIRNET LAB"]),
-            "dev" => Some([
-                "Start Interface in development mode (legacy)",
-                "Chạy Interface ở chế độ phát triển (lệnh tương thích)",
-            ]),
-            "show" => Some(["Show the current profile", "Hiển thị hồ sơ hiện tại"]),
-            "check" => Some([
-                "Check profile and toolchain prerequisites",
-                "Kiểm tra hồ sơ và điều kiện toolchain",
-            ]),
-            "set" => Some([
-                "Update local profile ports",
-                "Cập nhật cổng của hồ sơ cục bộ",
-            ]),
-            "discover" => Some([
-                "List expected repository locations",
-                "Liệt kê vị trí repo dự kiến",
-            ]),
-            "clone" => Some([
-                "Clone selected missing checkouts",
-                "Clone các checkout còn thiếu đã chọn",
-            ]),
-            "update" => Some([
-                "Fast-forward selected clean checkouts",
-                "Cập nhật fast-forward các checkout sạch đã chọn",
-            ]),
+            "cnl" => Some(localization::COMMAND_ROOT),
+            "tui" => Some(localization::COMMAND_TUI),
+            "dev" => Some(localization::COMMAND_DEV),
+            "show" => Some(localization::COMMAND_ENV_SHOW),
+            "check" => Some(localization::COMMAND_ENV_CHECK),
+            "set" => Some(localization::COMMAND_ENV_SET),
+            "discover" => Some(localization::COMMAND_REPO_DISCOVER),
+            "clone" => Some(localization::COMMAND_REPO_CLONE),
+            "update" => Some(localization::COMMAND_REPO_UPDATE),
+            "__complete" => Some(localization::COMMAND_COMPLETION_QUERY),
             _ => None,
         },
     }
     .map(|value| text(value, vi))
     .or_else(|| detail(name, vi));
-    if let Some(description) = description {
-        command = command.about(description);
-    }
+    let description =
+        description.unwrap_or_else(|| panic!("missing command description for {name}"));
+    command = command.about(description);
     let parent = command.get_name().to_owned();
     if vi {
         command = command
@@ -213,23 +156,21 @@ fn localize_command(mut command: clap::Command, parent: &str, vi: bool) -> clap:
         }
     }
     command
-        .mut_args(
-            |arg| match crate::localization::option(arg.get_id().as_str()) {
-                Some(label) if vi || arg.get_help().is_none() => {
-                    if vi {
-                        let heading = if arg.get_long().is_some() {
-                            "Tùy chọn"
-                        } else {
-                            "Đối số"
-                        };
-                        arg.help(text(label, vi)).help_heading(heading)
-                    } else {
-                        arg.help(text(label, vi))
-                    }
-                }
-                None => arg,
-                Some(_) => arg,
-            },
-        )
+        .mut_args(|arg| {
+            let id = arg.get_id().as_str();
+            let label = localization::option(id)
+                .unwrap_or_else(|| panic!("missing option description for {parent}::{id}"));
+            let arg = arg.help(text(label, vi));
+            if vi {
+                let heading = if arg.get_long().is_some() {
+                    "Tùy chọn"
+                } else {
+                    "Đối số"
+                };
+                arg.help_heading(heading)
+            } else {
+                arg
+            }
+        })
         .mut_subcommands(|child| localize_command(child, &parent, vi))
 }

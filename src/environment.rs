@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    localization::message,
+    localization::{self, message},
     process::{capture, run},
     workspace::{Repo, Workspace, canonical},
 };
@@ -43,13 +43,7 @@ impl Profile {
             || self.port == self.dev_port
             || self.hardware_port == self.dev_port
         {
-            bail!(
-                "{}",
-                message([
-                    "HTTP, Hardware RPC and Vite ports must be distinct and in 1024..=65535",
-                    "Cổng HTTP, Hardware RPC và Vite phải khác nhau và nằm trong 1024..=65535"
-                ])
-            );
+            bail!("{}", message(localization::PROFILE_PORTS));
         }
         Ok(())
     }
@@ -68,34 +62,19 @@ impl State {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
         {
-            bail!(
-                "{}",
-                message([
-                    "Use a profile name with letters, digits, hyphens or underscores",
-                    "Tên hồ sơ chỉ dùng chữ cái, chữ số, dấu gạch ngang hoặc gạch dưới"
-                ])
-            );
+            bail!("{}", message(localization::PROFILE_NAME));
         }
         let base = match selected {
             Some(path) => {
                 if !path.is_absolute() {
-                    bail!(
-                        "{}",
-                        message([
-                            "--state-dir requires an absolute external path",
-                            "--state-dir yêu cầu đường dẫn tuyệt đối nằm ngoài repo"
-                        ])
-                    );
+                    bail!("{}", message(localization::STATE_ABSOLUTE));
                 }
                 path.to_owned()
             }
             None => {
                 let root = env::var_os("LOCALAPPDATA")
                     .map(PathBuf::from)
-                    .context(message([
-                        "Set --state-dir when LOCALAPPDATA is unavailable",
-                        "Đặt --state-dir khi không có LOCALAPPDATA",
-                    ]))?;
+                    .context(message(localization::STATE_LOCALAPPDATA))?;
                 let key = format!(
                     "{:x}",
                     Sha256::digest(workspace.root.to_string_lossy().to_lowercase())
@@ -105,23 +84,16 @@ impl State {
         };
         let mut present = base.as_path();
         while !present.exists() {
-            present = present.parent().context(message([
-                "State path has no existing ancestor",
-                "Đường dẫn trạng thái không có thư mục cha đang tồn tại",
-            ]))?;
+            present = present
+                .parent()
+                .context(message(localization::STATE_ANCESTOR))?;
         }
         let tail = base.strip_prefix(present)?;
         if tail
             .components()
             .any(|part| !matches!(part, std::path::Component::Normal(_)))
         {
-            bail!(
-                "{}",
-                message([
-                    "State path must use ordinary directory names",
-                    "Đường dẫn trạng thái phải dùng tên thư mục thông thường"
-                ])
-            );
+            bail!("{}", message(localization::STATE_DIRECTORY_NAMES));
         }
         let resolved = canonical(present)?.join(tail);
         if resolved.ancestors().any(|part| {
@@ -133,26 +105,14 @@ impl State {
             .any(|repo| contains_ignoring_case(&workspace.path(*repo), &resolved))
             || resolved.exists() && !resolved.is_dir()
         {
-            bail!(
-                "{}",
-                message([
-                    "State and artifacts must be outside repository and Git directories",
-                    "Trạng thái và artifact phải nằm ngoài repo và thư mục Git"
-                ])
-            );
+            bail!("{}", message(localization::STATE_OUTSIDE_GIT));
         }
         let profile_name = profile.to_owned();
         let dir = resolved.join(profile);
         if let Ok(info) = fs::symlink_metadata(&dir)
             && (!info.is_dir() || canonical(&dir)? != dir)
         {
-            bail!(
-                "{}",
-                message([
-                    "The profile directory must be an ordinary directory",
-                    "Thư mục hồ sơ phải là thư mục thông thường"
-                ])
-            );
+            bail!("{}", message(localization::PROFILE_DIRECTORY));
         }
         let profile_path = dir.join("profile.json");
         let profile = if profile_path.exists() {
@@ -181,10 +141,8 @@ impl State {
             .create(true)
             .truncate(false)
             .open(self.dir.join("operation.lock"))?;
-        file.try_lock().context(message([
-            "Another cnl operation is using this profile",
-            "Một thao tác cnl khác đang dùng hồ sơ này",
-        ]))?;
+        file.try_lock()
+            .context(message(localization::PROFILE_IN_USE))?;
         Ok(file)
     }
 
@@ -258,14 +216,16 @@ pub fn doctor(workspace: &Workspace) -> Value {
                             });
                     json!({"tool":name,"ok":identified && supported,"version":version})
                 }
-                Err(error) => json!({"tool":name,"ok":false,"detail":error.to_string()}),
+                Err(error) => {
+                    json!({"tool":name,"ok":false,"detail":localization::report_diagnostic(&error)})
+                }
             }
         })
         .collect::<Vec<_>>();
     let msvc = vswhere().and_then(|exe| capture(Command::new(exe).args(VS_ARGS)));
     checks.push(match msvc {
         Ok(path) if !path.is_empty() => json!({"tool":"msvc","ok":true,"path":path}),
-        _ => json!({"tool":"msvc","ok":false,"detail":message(["Install VS 2022 with the x64 C++ tools and Windows SDK", "Cài VS 2022 với công cụ C++ x64 và Windows SDK"])}),
+        _ => json!({"tool":"msvc","ok":false,"detail":localization::report_message(localization::DOCTOR_MSVC)}),
     });
     let platform = cfg!(all(windows, target_arch = "x86_64"));
     json!({"supportedPlatform":platform,"os":env::consts::OS,"architecture":env::consts::ARCH,
@@ -287,18 +247,12 @@ pub const VS_ARGS: [&str; 9] = [
 pub fn vswhere() -> Result<PathBuf> {
     let path = env::var_os("ProgramFiles(x86)")
         .map(PathBuf::from)
-        .context(message([
-            "Visual Studio installation directory unavailable",
-            "Không tìm thấy thư mục cài đặt Visual Studio",
-        ]))?
+        .context(message(localization::VS_DIRECTORY_MISSING))?
         .join("Microsoft Visual Studio/Installer/vswhere.exe");
     if !path.is_file() {
         bail!(
             "{} {}",
-            message([
-                "Visual Studio Installer not found at",
-                "Không tìm thấy Visual Studio Installer tại"
-            ]),
+            message(localization::VS_INSTALLER_MISSING),
             path.display()
         );
     }
@@ -308,20 +262,11 @@ pub fn vswhere() -> Result<PathBuf> {
 pub fn install_browser(receipt: &Path, cache: &Path) -> Result<()> {
     let interface = receipt
         .parent()
-        .context(message([
-            "Expected build receipt path",
-            "Cần đường dẫn receipt của bản dựng",
-        ]))?
+        .context(message(localization::BUILD_RECEIPT_REQUIRED))?
         .join("src/cirnet-interface-next");
     let cli = interface.join("node_modules/@playwright/test/cli.js");
     if !cli.is_file() {
-        bail!(
-            "{}",
-            message([
-                "The selected candidate does not include a prepared Playwright checkout",
-                "Ứng viên đã chọn thiếu checkout đã chuẩn bị cho Playwright"
-            ])
-        );
+        bail!("{}", message(localization::PLAYWRIGHT_MISSING));
     }
     run(Command::new("node")
         .arg(cli)

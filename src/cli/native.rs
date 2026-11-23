@@ -3,7 +3,7 @@ use std::{
     process::{Command, ExitStatus},
 };
 
-use crate::localization::message;
+use crate::localization::{self, message};
 use anyhow::{Context, Result, bail};
 
 pub(crate) const SHELLS: [&str; 4] = ["powershell", "cmd", "bash", "wsl"];
@@ -28,11 +28,8 @@ fn shell(selected: Option<&str>) -> Result<Command> {
         }
         name => bail!(
             "{} ({name}). {}",
-            message([
-                "Shell unavailable on this platform",
-                "Shell không khả dụng trên nền tảng này"
-            ]),
-            message(["See cnl shell --help.", "Xem cnl shell --help."])
+            message(localization::SHELL_PLATFORM),
+            message(localization::SHELL_HELP)
         ),
     }
 }
@@ -43,11 +40,8 @@ pub(crate) fn interactive(selected: Option<&str>) -> Result<ExitStatus> {
     command.status().with_context(|| {
         format!(
             "{} {name}. {}",
-            message(["Cannot start", "Không thể mở"]),
-            message([
-                "Install it or select an available native shell",
-                "Hãy cài đặt hoặc chọn một shell native đang có"
-            ])
+            message(localization::SHELL_START_FAILED),
+            message(localization::SHELL_INSTALL)
         )
     })
 }
@@ -62,6 +56,7 @@ pub(crate) fn line(
         && !input.contains([
             '|', '&', '<', '>', ';', '$', '\u{0060}', '%', '*', '?', '(', ')',
         ])
+        && !(cfg!(windows) && input.contains("''") || !cfg!(windows) && input.contains('\\'))
         && let Some(args) = arguments(input)
     {
         let mut command = Command::new("git");
@@ -79,10 +74,7 @@ pub(crate) fn line(
 
 pub(crate) fn unavailable(error: io::Error) -> anyhow::Error {
     if error.kind() == io::ErrorKind::NotFound {
-        anyhow::Error::new(error).context(message([
-            "The executable or native shell is unavailable. Check PATH or use cnl shell",
-            "Không tìm thấy executable hoặc shell native. Hãy kiểm tra PATH hoặc dùng cnl shell",
-        ]))
+        anyhow::Error::new(error).context(message(localization::SHELL_UNAVAILABLE))
     } else {
         error.into()
     }
@@ -103,5 +95,16 @@ mod tests {
         let raw = "git status | Select-Object -First 1";
         let shell = line(raw, |_| panic!("native commands must retain shell syntax")).unwrap();
         assert!(shell.get_args().any(|arg| arg == raw));
+    }
+
+    #[test]
+    fn git_with_shell_quoted_apostrophe_uses_the_host_shell() {
+        let raw = if cfg!(windows) {
+            "git add 'O''Connor.txt'"
+        } else {
+            "git add 'O'\\''Connor.txt'"
+        };
+        let command = line(raw, |_| panic!("the host shell owns this quote syntax")).unwrap();
+        assert!(command.get_args().any(|arg| arg == raw));
     }
 }

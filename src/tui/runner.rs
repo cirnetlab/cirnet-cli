@@ -4,7 +4,7 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Result, bail};
@@ -12,15 +12,10 @@ use clap::ArgMatches;
 
 use super::viewport::Buffer;
 pub(super) use crate::process::sanitize_console_output as sanitize;
-use crate::{process::hidden, workspace::Workspace};
+use crate::{localization::terminal as labels, process::hidden, workspace::Workspace};
 
 const STREAM_LIMIT: usize = 128 * 1024;
 const LOG_FRAME_INTERVAL: Duration = Duration::from_millis(160);
-pub(super) const CANNOT_CANCEL: super::Localized = [
-    "Wait for this command to finish. Use stop for the application.",
-    "Đợi lệnh hoàn tất. Dùng stop để dừng ứng dụng.",
-];
-
 pub(super) enum Outcome {
     Pass,
     Fail,
@@ -34,8 +29,63 @@ pub(super) struct RunOutput {
 }
 
 pub(super) struct Update {
-    pub(super) buffer: Option<Buffer>,
+    pub(super) captured: Option<CapturedOutput>,
     pub(super) result: Option<RunOutput>,
+}
+
+pub(super) struct CapturedOutput {
+    stdout: String,
+    stderr: String,
+    report: Option<serde_json::Value>,
+    truncated: bool,
+}
+
+impl CapturedOutput {
+    fn new(stdout: &[u8], stderr: &[u8], truncated: bool, marker: Option<&str>) -> Self {
+        let mut report = None;
+        let mut external = Vec::new();
+        let stdout = if let Some(marker) = marker {
+            for line in stdout.split_inclusive(|byte| *byte == b'\n') {
+                if let Some(body) = line.strip_prefix(marker.as_bytes()) {
+                    if !line.ends_with(b"\n") {
+                        continue;
+                    }
+                    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body)
+                        && value.is_object()
+                    {
+                        report = Some(value);
+                        continue;
+                    }
+                }
+                external.extend_from_slice(line);
+            }
+            external.as_slice()
+        } else {
+            stdout
+        };
+        Self {
+            stdout: sanitize(stdout),
+            stderr: sanitize(stderr),
+            report,
+            truncated,
+        }
+    }
+
+    pub(super) fn render(&self, vi: bool) -> Buffer {
+        let mut stdout = self.stdout.clone();
+        if let Some(report) = &self.report {
+            if !stdout.is_empty() && !stdout.ends_with('\n') {
+                stdout.push('\n');
+            }
+            stdout.push_str(&sanitize(crate::cli::human_report(report, vi).as_bytes()));
+        }
+        Buffer::from_streams(
+            stdout,
+            &self.stderr,
+            self.truncated
+                .then_some(super::text(labels::OUTPUT_OMITTED, vi)),
+        )
+    }
 }
 
 #[derive(Default)]
@@ -79,6 +129,7 @@ pub(super) struct Runner {
     started: Instant,
     rendered: Instant,
     vi: bool,
+    report_marker: Option<String>,
 }
 
 impl Runner {
@@ -94,10 +145,7 @@ impl Runner {
         if action == Some("tui") {
             bail!(
                 "{}",
-                crate::localization::message([
-                    "The CIRNETLAB terminal is already open.",
-                    "Terminal CIRNETLAB đang mở."
-                ])
+                crate::localization::message(labels::TERMINAL_ALREADY_OPEN)
             );
         }
         let mut command = Command::new(std::env::current_exe()?);
@@ -122,13 +170,32 @@ impl Runner {
         if !supplied("lang") {
             command.args(["--lang", if vi { "vi" } else { "en" }]);
         }
-        command.args(args).env("NO_COLOR", "1");
-        Self::spawn(command, !matches!(action, Some("run" | "dev" | "stop")), vi)
+        let report_nonce = parsed
+            .as_ref()
+            .is_ok_and(|matches| !matches.get_flag("json") && action != Some("logs"))
+            .then(|| {
+                let instant = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default();
+                format!("{}x{}", std::process::id(), instant.as_nanos())
+            });
+        command
+            .args(args)
+            .env("NO_COLOR", "1")
+            .env_remove("CNL_TUI_REPORT");
+        if let Some(nonce) = &report_nonce {
+            command.env("CNL_TUI_REPORT", nonce);
+        }
+        let mut worker = Self::spawn(command, !matches!(action, Some("run" | "dev" | "stop")), vi)?;
+        worker.report_marker =
+            report_nonce.map(|nonce| format!("{}{nonce} ", crate::cli::TUI_REPORT_MARKER));
+        Ok(worker)
     }
 
     pub(super) fn start_native(line: &str, vi: bool) -> Result<Self> {
-        let command =
+        let mut command =
             crate::cli::native::line(line, |input| super::completion::arguments(input).ok())?;
+        command.env_remove("CNL_TUI_REPORT");
         Self::spawn(command, true, vi)
     }
 
@@ -169,6 +236,7 @@ impl Runner {
             started,
             rendered: started,
             vi,
+            report_marker: None,
         })
     }
 
@@ -201,7 +269,6 @@ impl Runner {
     pub(super) fn set_language(&mut self, vi: bool) {
         if self.vi != vi {
             self.vi = vi;
-            self.capture.lock().expect("output capture").dirty = true;
         }
     }
 
@@ -212,7 +279,7 @@ impl Runner {
         let finished = self
             .exit
             .filter(|_| self.readers.iter().all(JoinHandle::is_finished));
-        let buffer = if finished.is_some() || self.rendered.elapsed() >= LOG_FRAME_INTERVAL {
+        let captured = if finished.is_some() || self.rendered.elapsed() >= LOG_FRAME_INTERVAL {
             let mut capture = self.capture.lock().expect("output capture");
             self.rendered = Instant::now();
             if std::mem::take(&mut capture.dirty) {
@@ -220,17 +287,11 @@ impl Runner {
                 let stderr = capture.stderr.bytes.clone();
                 let truncated = capture.stdout.truncated || capture.stderr.truncated;
                 drop(capture);
-                let notice = super::text(
-                    [
-                        "Earlier output was omitted.",
-                        "Đã lược bớt phần đầu của kết quả.",
-                    ],
-                    self.vi,
-                );
-                Some(Buffer::from_streams(
-                    sanitize(&stdout),
-                    &sanitize(&stderr),
-                    truncated.then_some(notice),
+                Some(CapturedOutput::new(
+                    &stdout,
+                    &stderr,
+                    truncated,
+                    self.report_marker.as_deref(),
                 ))
             } else {
                 None
@@ -249,7 +310,7 @@ impl Runner {
             exit_code: exit.code(),
             elapsed_ms: self.started.elapsed().as_millis(),
         });
-        Ok(Update { buffer, result })
+        Ok(Update { captured, result })
     }
 
     pub(super) fn cancel(&mut self) -> Result<(), &'static str> {
@@ -257,7 +318,7 @@ impl Runner {
             return Ok(());
         }
         let Some(job) = self.job.take() else {
-            return Err(super::text(CANNOT_CANCEL, self.vi));
+            return Err(super::text(labels::CANNOT_CANCEL, self.vi));
         };
         self.cancelled = true;
         drop(job);
@@ -309,10 +370,7 @@ impl ProcessJob {
     fn attach(_: &Child) -> Result<Self> {
         bail!(
             "{}",
-            crate::localization::message([
-                "Process tree cancellation is available on Windows",
-                "Hủy cây tiến trình được hỗ trợ trên Windows"
-            ])
+            crate::localization::message(labels::CANCELLATION_WINDOWS_ONLY)
         )
     }
 }
@@ -320,6 +378,36 @@ impl ProcessJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_reports_relocalize_without_reinterpreting_raw_tool_output() {
+        let marker = format!("{}fixture ", crate::cli::TUI_REPORT_MARKER);
+        let line = format!(
+            "external tool text\n{}raw external text\n{marker}{{\"state\":\"stopped\"}}\n",
+            crate::cli::TUI_REPORT_MARKER
+        );
+        let output = CapturedOutput::new(
+            line.as_bytes(),
+            b"external stderr text\n",
+            false,
+            Some(&marker),
+        );
+        let en = output.render(false);
+        let vi = output.render(true);
+        assert!(en.find("Stopped", None, false).is_some());
+        assert!(vi.find("Đã dừng", None, false).is_some());
+        for buffer in [en, vi] {
+            assert!(buffer.find("external tool text", None, false).is_some());
+            assert!(buffer.find("external stderr text", None, false).is_some());
+            assert!(buffer.find("raw external text", None, false).is_some());
+            assert!(buffer.find(&marker, None, false).is_none());
+        }
+        let raw = CapturedOutput::new(line.as_bytes(), b"", false, None).render(false);
+        assert!(
+            raw.find(crate::cli::TUI_REPORT_MARKER, None, false)
+                .is_some()
+        );
+    }
 
     #[test]
     fn child_fixture() {

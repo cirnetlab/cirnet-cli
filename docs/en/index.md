@@ -33,7 +33,7 @@ Run `cnl` or `cnl tui` in a terminal. Use `--lang vi` for Vietnamese or set `NO_
 
 ## Develop and verify
 
-In the terminal, selecting a menu entry opens a fresh prompt with its base command. Recommended actions appear in the completion list. Type `cnl --lang vi` or `cnl tui --lang vi` to switch the open TUI to Vietnamese. Use `en` to switch back. The terminal adapts the [CNR menu](https://github.com/cirnetlab/cirnet-rules/tree/646afa38516bbfd276b0aecb7a138ab427df5fa9/src/cli/menu) under GPL-3.0.
+In the terminal, selecting a menu entry opens a fresh prompt with its base command. Recommended actions appear in the completion list. Press F8 to switch between English and Vietnamese while editing. See the [command reference](commands.md#interactive-terminal) for history and native completion. The terminal adapts the [CNR menu](https://github.com/cirnetlab/cirnet-rules/tree/646afa38516bbfd276b0aecb7a138ab427df5fa9/src/cli/menu) under GPL-3.0.
 
 Start with `cnl run --desktop interface --initialize-db` to serve the live Interface checkout through Vite, with its existing API and WebSocket proxies. Choose a different development port when the default is occupied. The CLI checks HTTP, the served Interface and the protected WebSocket route before opening the browser. The native launcher trusts the selected Vite loopback origin. When the candidate changes, the CLI preserves the previous verified input cache under the ignored `.runtime/` directory. Unrecognized cache contents require inspection.
 

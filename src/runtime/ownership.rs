@@ -1,3 +1,5 @@
+use crate::localization::{self, message};
+
 use std::process::Child;
 
 use anyhow::{Context, Result};
@@ -12,10 +14,8 @@ pub struct Process {
 impl Process {
     pub fn identify(child: &Child) -> Result<Self> {
         let pid = child.id();
-        let created = creation_time(pid)?.context(crate::localization::message([
-            "Owned process exited before identity could be recorded",
-            "Tiến trình do CLI quản lý đã thoát trước khi ghi nhận định danh",
-        ]))?;
+        let created =
+            creation_time(pid)?.context(message(localization::PROCESS_GONE_BEFORE_IDENTITY))?;
         Ok(Self { pid, created })
     }
 
@@ -41,15 +41,8 @@ fn creation_time(pid: u32) -> Result<Option<u64>> {
         if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
             return Ok(None);
         }
-        return Err(error).with_context(|| {
-            format!(
-                "{} {pid}",
-                crate::localization::message([
-                    "Cannot inspect process",
-                    "Không thể kiểm tra tiến trình"
-                ])
-            )
-        });
+        return Err(error)
+            .with_context(|| format!("{} {pid}", message(localization::PROCESS_INSPECT_FAILED)));
     }
     let result = (|| {
         let mut exit = 0;
@@ -80,13 +73,7 @@ fn creation_time(pid: u32) -> Result<Option<u64>> {
 
 #[cfg(not(windows))]
 fn creation_time(_: u32) -> Result<Option<u64>> {
-    anyhow::bail!(
-        "{}",
-        crate::localization::message([
-            "Runtime process control requires Windows x64",
-            "Điều khiển tiến trình runtime yêu cầu Windows x64"
-        ])
-    )
+    anyhow::bail!("{}", message(localization::PROCESS_CONTROL_PLATFORM))
 }
 
 #[cfg(all(test, windows))]

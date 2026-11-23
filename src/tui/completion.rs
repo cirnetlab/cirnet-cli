@@ -1,5 +1,7 @@
 use clap::{Arg, Command};
-use std::{borrow::Cow, ops::Range, sync::OnceLock};
+use std::{borrow::Cow, collections::HashSet, ops::Range, sync::OnceLock};
+
+mod native;
 
 const LIMIT: usize = 7;
 const MAX_INPUT: usize = 8192;
@@ -23,6 +25,7 @@ pub(super) enum Kind {
     Subcommand,
     Option,
     Value,
+    Path,
     History,
 }
 
@@ -33,6 +36,7 @@ impl Kind {
             Self::Subcommand => ["action", "thao tác"],
             Self::Option => ["option", "tùy chọn"],
             Self::Value => ["value", "giá trị"],
+            Self::Path => ["path", "đường dẫn"],
             Self::History => ["history", "lịch sử"],
         };
         labels[usize::from(vi)]
@@ -42,6 +46,7 @@ impl Kind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Source {
     Cli,
+    Native,
     Menu,
     History,
 }
@@ -151,14 +156,63 @@ fn fuzzy_score(candidate: &str, prefix: &str) -> Option<usize> {
 
 pub(super) struct Completer {
     vi: bool,
+    native: native::Completer,
 }
 
 impl Completer {
     pub(super) fn new(vi: bool) -> Self {
-        Self { vi }
+        Self {
+            vi,
+            native: native::Completer::new(),
+        }
+    }
+
+    pub(super) fn set_language(&mut self, vi: bool) {
+        self.vi = vi;
+    }
+
+    pub(super) fn metadata_ready(&self) -> bool {
+        self.native.metadata_ready()
+    }
+
+    pub(super) fn metadata_pending(&self) -> bool {
+        self.native.metadata_pending()
     }
 
     pub(super) fn suggestions(&self, input: &str, cursor: usize) -> Vec<Suggestion> {
+        self.native.reset_request();
+        if input.len() > MAX_INPUT || !input.is_char_boundary(cursor) {
+            return Vec::new();
+        }
+        let first = input[..cursor]
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        let is_cnl = matches!(first, "cnl" | "cnl.exe" | "clear")
+            || first.starts_with('-')
+            || grammar().find_subcommand(first).is_some();
+        if is_cnl || first.is_empty() {
+            return self.cnl_suggestions(input, cursor);
+        }
+        let native = self.native.suggestions(input, cursor, self.vi);
+        if !input[..cursor].trim_start().contains(char::is_whitespace) {
+            let mut choices = self.cnl_suggestions(input, cursor);
+            choices.extend(native);
+            choices.sort_by_key(|item| {
+                !item
+                    .text
+                    .starts_with(&input[item.insert_range.start..cursor])
+            });
+            let mut seen = HashSet::new();
+            choices.retain(|item| seen.insert((item.text.clone(), item.insert_range.clone())));
+            choices.truncate(LIMIT);
+            choices
+        } else {
+            native
+        }
+    }
+
+    fn cnl_suggestions(&self, input: &str, cursor: usize) -> Vec<Suggestion> {
         if input.len() > MAX_INPUT || !input.is_char_boundary(cursor) {
             return Vec::new();
         }
@@ -173,7 +227,10 @@ impl Completer {
             .iter()
             .filter(|word| word.range.end <= range.start)
             .peekable();
-        if previous.peek().is_some_and(|word| word.value == "cnl") {
+        if previous
+            .peek()
+            .is_some_and(|word| matches!(word.value.as_ref(), "cnl" | "cnl.exe"))
+        {
             previous.next();
         }
         let mut command = grammar_for(self.vi);
@@ -423,7 +480,7 @@ pub(crate) fn query(args: &clap::ArgMatches) -> anyhow::Result<()> {
     if cursor >= start {
         let offset = cursor - start;
         let mut output = std::io::stdout().lock();
-        for choice in Completer::new(false).suggestions(&line[start..], offset) {
+        for choice in Completer::new(false).cnl_suggestions(&line[start..], offset) {
             writeln!(output, "{}", choice.text)?;
         }
     }
@@ -433,6 +490,48 @@ pub(crate) fn query(args: &clap::ArgMatches) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs, io,
+        path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> io::Result<Self> {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "cnl-completion-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&root)?;
+            Ok(Self(root))
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn wait_for_metadata(completer: &Completer, input: &str, cursor: usize) -> Vec<Suggestion> {
+        let mut choices = completer.suggestions(input, cursor);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while completer.metadata_pending() && Instant::now() < deadline {
+            if completer.metadata_ready() {
+                choices = completer.suggestions(input, cursor);
+            } else {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert!(!completer.metadata_pending(), "completion worker timed out");
+        choices
+    }
 
     #[test]
     fn suppresses_unrelated_globals_consumed_options_and_conflicting_scopes() {
@@ -449,8 +548,110 @@ mod tests {
         assert!(!choices("run --desktop interface --de").contains(&"--desktop".to_owned()));
         assert!(!choices("repos clone remote --a").contains(&"--all".to_owned()));
         assert!(choices("repos clone --all re").is_empty());
-        assert!(choices("git ").is_empty());
         assert!(choices("run --bogus ").is_empty());
+    }
+
+    #[test]
+    fn native_git_completes_at_the_cursor_without_replacing_later_tokens() {
+        let completer = Completer::new(false);
+        let choices = completer.suggestions("git st --short", 6);
+        assert_eq!(
+            choices
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>(),
+            ["status", "stash"],
+        );
+        assert!(choices.iter().all(|item| item.insert_range == (4..6)));
+        assert_eq!(completer.suggestions("gi", 2)[0].text, "git");
+        assert!(
+            completer
+                .suggestions("git checkout --", 15)
+                .iter()
+                .any(|item| item.text == "--detach")
+        );
+    }
+
+    #[test]
+    fn native_windows_shell_prefixes_route_to_their_own_syntax() {
+        let completer = Completer::new(true);
+        let contains = |line: &str, candidate| {
+            completer
+                .suggestions(line, line.len())
+                .iter()
+                .any(|item| item.text == candidate && !item.description.is_ascii())
+        };
+        if cfg!(windows) {
+            assert!(contains("cmd /c dir /", "/B"));
+            assert!(contains("wsl --exec ls --", "--all"));
+            assert!(contains("Get-Ch", "Get-ChildItem"));
+            assert!(contains("Get-ChildItem -", "-Filter"));
+        } else {
+            assert!(contains("ls --", "--all"));
+        }
+    }
+
+    #[test]
+    fn native_git_reads_loose_and_packed_local_worktree_branches() -> io::Result<()> {
+        let root = TestDir::new()?;
+        let worktree = root.0.join("checkout with spaces");
+        fs::create_dir(&worktree)?;
+        fs::write(worktree.join(".git"), "gitdir: ../git/worktrees/checkout\n")?;
+        fs::create_dir_all(root.0.join("git/worktrees/checkout"))?;
+        fs::write(root.0.join("git/worktrees/checkout/commondir"), "../..\n")?;
+        fs::create_dir_all(root.0.join("git/refs/heads/feature"))?;
+        fs::write(root.0.join("git/refs/heads/feature/local"), "")?;
+        fs::write(
+            root.0.join("git/packed-refs"),
+            "# pack-refs with: peeled fully-peeled sorted\n\
+             0123456789abcdef0123456789abcdef01234567 refs/heads/feature/packed\n\
+             0123456789abcdef0123456789abcdef01234567 refs/remotes/origin/feature/unwanted\n",
+        )?;
+        let input = format!("git -C \"{}\" switch feature/", worktree.display());
+        let choices = wait_for_metadata(&Completer::new(false), &input, input.len());
+        assert_eq!(
+            choices
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>(),
+            ["feature/local", "feature/packed"],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_paths_complete_unicode_inside_incomplete_quotes() -> io::Result<()> {
+        let root = TestDir::new()?;
+        fs::write(root.0.join("Tệp dữ liệu.txt"), "")?;
+        let path = root.0.join("Tệp d");
+        let input = format!("git add \"{}", path.display());
+        let before_end = wait_for_metadata(&Completer::new(true), &input, input.len());
+        let [choice] = before_end.as_slice() else {
+            panic!("expected one path, got {before_end:?}");
+        };
+        assert_eq!(
+            choice.label,
+            root.0.join("Tệp dữ liệu.txt").to_string_lossy()
+        );
+        assert_eq!(choice.kind, Kind::Path);
+        assert_eq!(choice.description, "Tệp");
+        let completed = format!("{}{}", &input[..choice.insert_range.start], choice.text);
+        assert_eq!(arguments(&completed).unwrap()[2], choice.label);
+
+        let edited = format!("{input}raft\" --force");
+        let cursor = input.len();
+        let after_edit = wait_for_metadata(&Completer::new(false), &edited, cursor);
+        let [choice] = after_edit.as_slice() else {
+            panic!("expected one path, got {after_edit:?}");
+        };
+        assert_eq!(&edited[choice.insert_range.end..], " --force");
+        let inside_unicode = edited.find('ệ').unwrap() + 1;
+        assert!(
+            Completer::new(false)
+                .suggestions(&edited, inside_unicode)
+                .is_empty()
+        );
+        Ok(())
     }
 
     #[test]

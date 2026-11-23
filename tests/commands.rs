@@ -142,6 +142,164 @@ fn binary_localizes_application_diagnostics_without_requiring_a_profile() {
 }
 
 #[test]
+fn vietnamese_help_and_parser_diagnostics_localize_the_cli_grammar() {
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_cnl"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let help = run(&["--lang", "vi", "help", "env"]);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("Cách dùng"));
+    assert!(help.contains("Hiển thị trợ giúp cho lệnh"));
+    assert!(help.contains("[mặc định: windows-x64]"));
+    assert!(help.contains("[giá trị hợp lệ: en, vi]"));
+    assert!(!help.contains("Print this message"));
+    let tui = run(&["tui", "--lang", "vi", "--help"]);
+    assert!(tui.status.success());
+    let tui = String::from_utf8(tui.stdout).unwrap();
+    assert!(tui.contains("--persist-history"));
+    assert!(tui.contains("Lưu lịch sử lệnh"));
+    for args in [
+        &["cnl", "--persist-history"][..],
+        &["cnl", "tui", "--persist-history"][..],
+    ] {
+        let matches = cli::app().try_get_matches_from(args).unwrap();
+        assert!(matches.get_flag("persist-history"));
+    }
+
+    for (args, expected) in [
+        (
+            &["run", "--mode", "another-mode"][..],
+            "Giá trị không hợp lệ",
+        ),
+        (&["run", "--port", "80"][..], "Giá trị không hợp lệ"),
+        (&["build"][..], "Thiếu đối số bắt buộc"),
+        (&["repos"][..], "Thiếu lệnh con"),
+        (&["unknown-command"][..], "Lệnh con không hợp lệ"),
+    ] {
+        let output = run(&[&["--lang", "vi"], args].concat());
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains(expected), "{args:?}: {error}");
+        assert!(error.contains("--help"));
+    }
+    let invalid = run(&["--lang", "en", "run", "--mode", "another-mode"]);
+    let invalid = String::from_utf8(invalid.stderr).unwrap();
+    assert!(invalid.contains("another-mode") && invalid.contains("invalid value"));
+}
+
+#[test]
+fn human_reports_localize_nested_fields_and_leave_json_language_independent() {
+    use std::{fs, path::PathBuf, process::Output};
+
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir(&self.0);
+        }
+    }
+    let fixture = Fixture(std::env::temp_dir().join(format!("cnl-locales-{}", std::process::id())));
+    fs::create_dir(&fixture.0).unwrap();
+    let state = fixture.0.join("state");
+    let run = |lang, json, args: &[&str]| -> Output {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cnl"));
+        command
+            .env_remove("CNL_TUI_REPORT")
+            .arg("--workspace")
+            .arg(&fixture.0)
+            .arg("--state-dir")
+            .arg(&state)
+            .args(["--lang", lang]);
+        if json {
+            command.arg("--json");
+        }
+        command.args(args).output().unwrap()
+    };
+    for (args, english, vietnamese) in [
+        (
+            &["doctor"][..],
+            "Supported platform",
+            "Nền tảng được hỗ trợ",
+        ),
+        (
+            &["env", "check"][..],
+            "Hardware RPC port",
+            "Cổng Hardware RPC",
+        ),
+        (&["repos", "status"][..], "Missing", "Thiếu checkout"),
+        (
+            &["repos", "clone", "cli", "--dry-run"][..],
+            "Clone",
+            "Sao chép checkout",
+        ),
+        (
+            &["build", "--all", "--dry-run"][..],
+            "Build order",
+            "Thứ tự bản dựng",
+        ),
+        (&["run", "--dry-run"][..], "Development", "Phát triển"),
+        (&["status"][..], "Stopped", "Đã dừng"),
+        (
+            &["stop", "--dry-run"][..],
+            "Owned instance",
+            "Phiên do CLI quản lý",
+        ),
+        (
+            &["verify", "--dry-run"][..],
+            "Integration checks",
+            "Kiểm thử tích hợp",
+        ),
+    ] {
+        for (lang, expected) in [("en", english), ("vi", vietnamese)] {
+            let stdout = String::from_utf8(run(lang, false, args).stdout).unwrap();
+            assert!(stdout.contains(expected), "{args:?} ({lang}): {stdout}");
+            assert!(!stdout.contains("\"hardware_port\""), "{args:?}: {stdout}");
+        }
+        let structured = |lang| -> serde_json::Value {
+            let stdout = run(lang, true, args).stdout;
+            serde_json::from_slice(&stdout).unwrap_or_else(|error| panic!("{args:?}: {error}"))
+        };
+        let en = structured("en");
+        assert_eq!(en, structured("vi"), "{args:?}");
+        if args[0] == "run" {
+            assert_eq!(en["mode"], "development");
+            assert_eq!(en["ports"]["hardware_port"], 50051);
+        }
+        if args[0] == "repos" && args[1] == "status" {
+            assert_eq!(en["repositories"][0]["state"], "missing");
+        }
+    }
+    let transport = |json| {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cnl"));
+        command
+            .env("CNL_TUI_REPORT", "ReportFixture123")
+            .arg("--workspace")
+            .arg(&fixture.0)
+            .arg("--lang=vi");
+        if json {
+            command.arg("--json");
+        }
+        let stdout = command.args(["repos", "status"]).output().unwrap().stdout;
+        String::from_utf8(stdout).unwrap()
+    };
+    let wire = transport(false);
+    let report: serde_json::Value = serde_json::from_str(
+        wire.strip_prefix("CNL_TUI_REPORT ReportFixture123 ")
+            .unwrap(),
+    )
+    .unwrap();
+    let diagnostic = &report["repositories"][0]["detail"]["$cnlDiagnostic"];
+    assert!(diagnostic[0].as_str().unwrap().contains("Checkout missing"));
+    assert!(diagnostic[1].as_str().unwrap().contains("Thiếu checkout"));
+    let direct: serde_json::Value = serde_json::from_str(&transport(true)).unwrap();
+    assert_eq!(direct["repositories"][0]["detail"], diagnostic[0]);
+    assert!(!state.exists());
+}
+
+#[test]
 fn a_port_in_use_fails_preflight() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     assert!(verify_ports(&[listener.local_addr().unwrap().port()]).is_err());

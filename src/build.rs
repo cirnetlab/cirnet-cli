@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     environment::{State, write_json},
-    localization::{MISSING_INVENTORY, message},
+    localization::{self, MISSING_INVENTORY, message},
     process::{capture, isolate_git, powershell, run},
     workspace::{Repo, Workspace, canonical},
 };
@@ -67,10 +67,7 @@ impl CandidateSelection {
         if self.schema_version != 1 {
             bail!(
                 "{} {}",
-                message([
-                    "Unsupported candidate selection schema",
-                    "Không hỗ trợ schema lựa chọn ứng viên"
-                ]),
+                message(localization::CANDIDATE_SCHEMA),
                 self.schema_version
             );
         }
@@ -80,17 +77,11 @@ impl CandidateSelection {
         {
             bail!(
                 "{} {} · {} · {}. {}",
-                message([
-                    "Candidate selection belongs to",
-                    "Lựa chọn ứng viên thuộc về"
-                ]),
+                message(localization::CANDIDATE_SCOPE),
                 self.workspace.display(),
                 self.profile,
                 self.state_directory.display(),
-                message([
-                    "Use that scope or choose a different --state-dir or --profile",
-                    "Dùng phạm vi đó hoặc chọn --state-dir hay --profile khác"
-                ])
+                message(localization::CANDIDATE_SCOPE_GUIDANCE)
             );
         }
         Ok(())
@@ -111,40 +102,40 @@ pub fn candidate(
                 SavedCandidate::Scoped(record) => {
                     record.validate_scope(workspace, state)?;
                     if !record.receipt.is_absolute() || !valid_sha(&record.manifest_sha256) {
-                        bail!(
-                            "{}",
-                            message([
-                                "Invalid recorded receipt path or manifest digest",
-                                "Đường dẫn receipt hoặc mã băm manifest đã lưu không hợp lệ"
-                            ])
-                        );
+                        bail!("{}", message(localization::CANDIDATE_RECORDED_RECEIPT));
                     }
                     Ok((record.receipt, Some(record.manifest_sha256)))
                 }
                 SavedCandidate::Legacy(path) if path.is_absolute() => Ok((path, None)),
-                SavedCandidate::Legacy(_) => bail!(
-                    "{}",
-                    message([
-                        "The legacy receipt path must be absolute",
-                        "Đường dẫn receipt cũ phải là đường dẫn tuyệt đối"
-                    ])
-                ),
+                SavedCandidate::Legacy(_) => {
+                    bail!("{}", message(localization::LEGACY_RECEIPT_PATH))
+                }
             }
         })();
-        saved.with_context(|| format!(
-            "{} {} · {} · {}. {} {}. {}",
-            message(["Cannot select a candidate for workspace", "Không thể chọn ứng viên cho workspace"]),
-            workspace.root.display(), state.name, state.dir.display(),
-            message(["Expected selection file", "Cần tệp lựa chọn"]), pointer.display(),
-            message(["Run cnl build --all with the same scope, or pass --receipt <assembly-result.json>", "Chạy cnl build --all trong cùng phạm vi hoặc truyền --receipt <assembly-result.json>"]),
-        ))?
+        saved.with_context(|| {
+            format!(
+                "{} {} · {} · {}. {} {}. {}",
+                message(localization::CANDIDATE_SELECT),
+                workspace.root.display(),
+                state.name,
+                state.dir.display(),
+                message(localization::CANDIDATE_SELECTION_FILE),
+                pointer.display(),
+                message(localization::CANDIDATE_SELECT_GUIDANCE),
+            )
+        })?
     };
-    read_candidate(workspace, &path, digest.as_deref()).with_context(|| format!(
-        "{} {} · {} · {} · {}. {}",
-        message(["Cannot use receipt", "Không thể dùng receipt"]),
-        path.display(), workspace.root.display(), state.name, state.dir.display(),
-        message(["Pass a valid --receipt <assembly-result.json> or run cnl build --all with the same scope", "Truyền --receipt <assembly-result.json> hợp lệ hoặc chạy cnl build --all trong cùng phạm vi"]),
-    ))
+    read_candidate(workspace, &path, digest.as_deref()).with_context(|| {
+        format!(
+            "{} {} · {} · {} · {}. {}",
+            message(localization::RECEIPT_UNUSABLE),
+            path.display(),
+            workspace.root.display(),
+            state.name,
+            state.dir.display(),
+            message(localization::RECEIPT_GUIDANCE),
+        )
+    })
 }
 
 fn read_candidate(workspace: &Workspace, path: &Path, digest: Option<&str>) -> Result<Candidate> {
@@ -156,22 +147,10 @@ fn read_candidate(workspace: &Workspace, path: &Path, digest: Option<&str>) -> R
         || !candidate.directory.is_dir()
         || !valid_sha(&candidate.manifest_sha256)
     {
-        bail!(
-            "{}",
-            message([
-                "Candidate receipt must pin a build in its own output session",
-                "Receipt phải tham chiếu bản dựng trong chính phiên xuất artifact của ứng viên"
-            ])
-        );
+        bail!("{}", message(localization::RECEIPT_SESSION));
     }
     if digest.is_some_and(|expected| expected != candidate.manifest_sha256) {
-        bail!(
-            "{}",
-            message([
-                "Candidate receipt digest differs from the recorded selection",
-                "Mã băm receipt của ứng viên khác lựa chọn đã lưu"
-            ])
-        );
+        bail!("{}", message(localization::RECEIPT_DIGEST));
     }
     let remote = workspace.require(Repo::Remote)?;
     let mut verifier = Command::new("node");
@@ -266,13 +245,7 @@ pub fn build(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result<
             }
         }
         if receipts.len() != 1 {
-            bail!(
-                "{}",
-                message([
-                    "Remote did not return exactly one verified assembly receipt",
-                    "Remote phải trả về đúng một receipt lắp ráp đã kiểm chứng"
-                ])
-            );
+            bail!("{}", message(localization::ASSEMBLY_RECEIPT_COUNT));
         }
         let receipt = receipts.pop().unwrap();
         let build = candidate(workspace, state, Some(&receipt))?;
@@ -363,18 +336,12 @@ fn trusted_web_inputs(candidate: &Candidate, inputs: &Path) -> Result<Value> {
                 })
             })
             .with_context(|| {
-                format!(
-                    "{} {role}",
-                    message(["Missing candidate input", "Thiếu đầu vào của ứng viên"])
-                )
+                format!("{} {role}", message(localization::CANDIDATE_INPUT_MISSING))
             })?;
         if declared["sha256"].is_null() || declared["sha256"] != expected["sha256"] {
             bail!(
                 "Interface {role} · {}",
-                message([
-                    "External input differs from the selected candidate artifact",
-                    "Đầu vào bên ngoài khác artifact của ứng viên đã chọn"
-                ])
+                message(localization::CANDIDATE_INPUT_MISMATCH)
             );
         }
     }
@@ -387,10 +354,9 @@ fn preserve_old_web_inputs(web: &Path, selected: &Value) -> Result<()> {
         return Ok(());
     }
     let marker = cache.join("selection.json");
-    let current: Value = serde_json::from_slice(&fs::read(&marker).context(message([
-        "Interface .artifacts has no selection receipt. Move or inspect it before refreshing dependencies",
-        "Thư mục .artifacts của Interface thiếu receipt lựa chọn. Hãy di chuyển hoặc kiểm tra trước khi làm mới phụ thuộc"
-    ]))?)?;
+    let current: Value = serde_json::from_slice(
+        &fs::read(&marker).context(message(localization::INTERFACE_SELECTION_MISSING))?,
+    )?;
     if WEB_ROLES
         .iter()
         .all(|role| current[role]["sha256"] == selected[role]["sha256"])
@@ -408,20 +374,13 @@ fn preserve_old_web_inputs(web: &Path, selected: &Value) -> Result<()> {
         || !ignored.lines().any(|line| line == ".runtime/")
         || canonical(&cache)? != cache
     {
-        bail!(
-            "{}",
-            message([
-                "Refusing to move an unowned Interface cache",
-                "Từ chối di chuyển cache Interface chưa xác minh được quyền quản lý"
-            ])
-        );
+        bail!("{}", message(localization::INTERFACE_CACHE_UNOWNED));
     }
     let mut expected = vec![marker];
     for role in WEB_ROLES {
-        let file = current[role]["path"].as_str().context(message([
-            "Missing cached artifact path",
-            "Thiếu đường dẫn artifact đã lưu trong cache",
-        ]))?;
+        let file = current[role]["path"]
+            .as_str()
+            .context(message(localization::INTERFACE_CACHED_ARTIFACT_MISSING))?;
         let file = PathBuf::from(file);
         if file.parent() != Some(cache.as_path())
             || canonical(&file)? != file
@@ -429,10 +388,7 @@ fn preserve_old_web_inputs(web: &Path, selected: &Value) -> Result<()> {
         {
             bail!(
                 "Interface {role} · {} {}",
-                message([
-                    "Cached artifact differs from the recorded selection. Inspect",
-                    "Artifact trong cache khác lựa chọn đã lưu. Hãy kiểm tra"
-                ]),
+                message(localization::INTERFACE_CACHED_ARTIFACT_MISMATCH),
                 cache.display()
             );
         }
@@ -446,31 +402,19 @@ fn preserve_old_web_inputs(web: &Path, selected: &Value) -> Result<()> {
     {
         bail!(
             "{} {}",
-            message([
-                "Interface cache contains unrecognized files. Inspect",
-                "Cache Interface chứa tệp chưa nhận diện. Hãy kiểm tra"
-            ]),
+            message(localization::INTERFACE_CACHE_UNKNOWN_FILES),
             cache.display()
         );
     }
     let runtime = web.join(".runtime");
     if runtime.exists() && canonical(&runtime)? != runtime {
-        bail!(
-            "{}",
-            message([
-                "Interface .runtime directory must be an ordinary directory",
-                "Thư mục .runtime của Interface phải là thư mục thông thường"
-            ])
-        );
+        bail!("{}", message(localization::INTERFACE_RUNTIME_DIRECTORY));
     }
     let backup = output_dir(&runtime, "cnl-previous-inputs")?.join(".artifacts");
     fs::rename(&cache, &backup)?;
     eprintln!(
         "{} {}",
-        message([
-            "Preserved previous Interface inputs at",
-            "Đã lưu các đầu vào Interface trước đó tại"
-        ]),
+        message(localization::INTERFACE_INPUTS_PRESERVED),
         backup.display()
     );
     Ok(())
@@ -492,13 +436,7 @@ pub fn verify(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result
             .session()
             .join("src/cirnet-remote-next/scripts/test-native-windows.mjs");
         if !runner.is_file() {
-            bail!(
-                "{}",
-                message([
-                    "The selected candidate has no staged native smoke runner",
-                    "Ứng viên đã chọn thiếu trình chạy kiểm thử nhanh native"
-                ])
-            );
+            bail!("{}", message(localization::VERIFY_RUNNER_MISSING));
         }
         let default_browser = state.dir.join("chromium");
         let browser = args
@@ -636,10 +574,7 @@ fn rtl(root: &Path, candidate: &Candidate, args: &ArgMatches, output: &Path) -> 
         .get_one::<PathBuf>("fpga-toolchain")
         .cloned()
         .or_else(|| env::var_os("CIRNET_FPGA_TOOLCHAIN_ROOT").map(PathBuf::from))
-        .context(message([
-            "Set --fpga-toolchain to the pinned Embedded Hardware toolchain root",
-            "Đặt --fpga-toolchain tới thư mục gốc toolchain Embedded Hardware đã ghim",
-        ]))?;
+        .context(message(localization::RTL_TOOLCHAIN_REQUIRED))?;
     let toolchain = canonical(&toolchain)?;
     let receipt = candidate
         .session()

@@ -3,7 +3,8 @@ use super::{
     terminal::{Line, Tone},
 };
 use std::ops::Range;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Default)]
 pub(super) struct Buffer {
@@ -65,8 +66,8 @@ impl Buffer {
                     let line = value.strip_suffix('\n').unwrap_or(value);
                     let mut start = 0;
                     let mut used = 0;
-                    for (index, ch) in line.char_indices() {
-                        let columns = ch.width().unwrap_or(0).min(width);
+                    for (index, grapheme) in line.grapheme_indices(true) {
+                        let columns = grapheme.width().min(width);
                         if used + columns > width {
                             rows.push(offset + start..offset + index);
                             start = index;
@@ -84,7 +85,17 @@ impl Buffer {
     }
 
     pub(super) fn row_start(&self, index: usize) -> Option<usize> {
-        self.wrap.as_ref()?.rows.get(index).map(|row| row.start)
+        self.row_range(index).map(|row| row.start)
+    }
+
+    pub(super) fn row_range(&self, index: usize) -> Option<Range<usize>> {
+        self.wrap.as_ref()?.rows.get(index).cloned()
+    }
+
+    pub(super) fn copy(&self, bytes: Range<usize>) -> Option<&str> {
+        (self.copy_safe && bytes.len() <= super::clipboard::MAX_BYTES)
+            .then(|| self.text.get(bytes))
+            .flatten()
     }
 
     pub(super) fn row_at(&self, byte: usize) -> usize {
@@ -131,7 +142,7 @@ impl Buffer {
         let row = wrap.rows.get(index)?;
         let mut line = Line::default();
         line.push(Tone::Plain, inset);
-        if wrap.width == 1 && self.text[row.clone()].width() > 1 {
+        if self.text[row.clone()].width() > wrap.width {
             // Retain the original bytes for search and for the next resize.
             line.push(Tone::Plain, "�");
             return Some(line);
@@ -180,6 +191,20 @@ fn separate(text: &mut String) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrap_never_splits_joined_glyphs_or_vietnamese_diacritics() {
+        let mut buffer = Buffer::from_streams("a🧑‍💻a\u{306}\u{301}東京".into(), "", None);
+        assert_eq!(buffer.layout(3), 3);
+        assert_eq!(buffer.line(0, "", None).unwrap().text(), "a🧑‍💻");
+        assert_eq!(
+            buffer.line(1, "", None).unwrap().text(),
+            "a\u{306}\u{301}東"
+        );
+        assert_eq!(buffer.line(2, "", None).unwrap().text(), "京");
+        assert_eq!(buffer.layout(1), 5);
+        assert_eq!(buffer.line(1, "", None).unwrap().text(), "�");
+    }
 
     #[test]
     fn styled_wrapping_preserves_indentation_and_unicode() {

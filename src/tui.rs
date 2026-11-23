@@ -1,8 +1,10 @@
+mod animation;
 mod banner;
 mod clipboard;
 pub(crate) mod completion;
 mod editor;
 mod highlight;
+mod history;
 mod interaction;
 mod runner;
 mod terminal;
@@ -14,6 +16,7 @@ use self::{
     clipboard::SystemClipboard,
     completion::{Completer, Kind, Source, Suggestion},
     editor::Input,
+    history::{History, Origin},
     interaction::Interaction,
     terminal::{Painter, Screen, Tone},
     viewport::Buffer,
@@ -32,17 +35,12 @@ use std::{
 };
 
 use crate::cli::catalog::{ENTRIES, Entry, Localized, text};
-use crate::localization;
+use crate::localization::{self, terminal as labels};
 
 const COMMAND_LIMIT: usize = 8192;
 const SEARCH_LIMIT: usize = 256;
-const HISTORY_LIMIT: usize = 100;
 const SUGGESTION_LIMIT: usize = 7;
-const COMMAND_TOO_LONG: Localized = ["Command exceeds 8 KiB.", "Lệnh vượt quá 8 KiB."];
-const PASTE_NEWLINE_NOTICE: Localized = [
-    "Input received. Press Enter to run.",
-    "Đã nhận nội dung. Nhấn Enter để chạy.",
-];
+use labels::{COMMAND_TOO_LONG, INPUT_RECEIVED as PASTE_NEWLINE_NOTICE};
 
 fn text_modifiers(key: KeyEvent) -> bool {
     !key.modifiers
@@ -82,10 +80,11 @@ impl Prompt {
 struct OutputView {
     title: Option<String>,
     buffer: Buffer,
+    captured: Option<runner::CapturedOutput>,
     scroll: usize,
+    scroll_anchor: Option<usize>,
     last_page: usize,
     page_size: usize,
-    width: usize,
     follow: bool,
     started_at: Instant,
     running: bool,
@@ -103,10 +102,11 @@ impl OutputView {
         Self {
             title: Some(title),
             buffer: Buffer::default(),
+            captured: None,
             scroll: 0,
+            scroll_anchor: None,
             last_page: 0,
             page_size: 0,
-            width: 0,
             follow: false,
             started_at: Instant::now(),
             running: true,
@@ -121,13 +121,15 @@ impl OutputView {
     }
 
     fn layout(&mut self, width: usize, height: usize) {
-        let anchor = self.buffer.row_start(self.scroll);
+        let anchor = self
+            .scroll_anchor
+            .or_else(|| self.buffer.row_start(self.scroll));
         self.page_size = height;
-        self.width = width;
         self.last_page = self.buffer.layout(width).saturating_sub(height.max(1));
         self.scroll = if self.follow {
             self.last_page
         } else {
+            self.scroll_anchor = anchor;
             anchor
                 .map_or(self.scroll, |offset| self.buffer.row_at(offset))
                 .min(self.last_page)
@@ -137,6 +139,11 @@ impl OutputView {
     fn scroll_to(&mut self, row: usize, follow: bool) -> Effect {
         let row = row.min(self.last_page);
         self.follow = follow && row == self.last_page;
+        self.scroll_anchor = if self.follow {
+            None
+        } else {
+            self.buffer.row_start(row)
+        };
         if row == self.scroll {
             return Effect::Idle;
         }
@@ -152,6 +159,17 @@ impl OutputView {
         self.hit = self.buffer.find(&self.query, self.hit.as_ref(), backwards);
         if let Some(hit) = &self.hit {
             self.scroll_to(self.buffer.row_at(hit.start), false);
+        }
+    }
+
+    fn render_capture(&mut self, vi: bool) {
+        let Some(captured) = &self.captured else {
+            return;
+        };
+        self.buffer = captured.render(vi);
+        if !self.query.is_empty() {
+            let previous = self.hit.as_ref().map(|hit| hit.start..hit.start);
+            self.hit = self.buffer.find(&self.query, previous.as_ref(), false);
         }
     }
 
@@ -228,9 +246,7 @@ struct Menu {
     prompt: Option<Prompt>,
     help: bool,
     output: Option<OutputView>,
-    history: Vec<String>,
-    history_index: Option<usize>,
-    history_draft: Input,
+    history: History,
     completer: Completer,
     banner: Banner,
     interaction: Interaction,
@@ -247,9 +263,7 @@ impl Menu {
             prompt: None,
             help: false,
             output: None,
-            history: Vec::new(),
-            history_index: None,
-            history_draft: Input::default(),
+            history: History::default(),
             completer: Completer::new(vi),
             banner: Banner::default(),
             interaction: Interaction::default(),
@@ -323,8 +337,7 @@ impl Menu {
             ..Prompt::default()
         });
         self.help = false;
-        self.history_index = None;
-        self.history_draft = Input::default();
+        self.history.reset_navigation();
     }
 
     fn begin_output(&mut self, args: &[String]) {
@@ -335,15 +348,15 @@ impl Menu {
 
     fn close_main_prompt(&mut self) -> bool {
         let closed = self.prompt.take().is_some();
-        self.history_index = None;
-        self.history_draft = Input::default();
+        self.history.reset_navigation();
         closed
     }
 
     fn switch_language(&mut self, vi: bool) {
         let selected = self.items.get(self.selected).copied();
+        let first = self.first;
         if let Some(output) = &mut self.output {
-            let transient = [["Cancelling…", "Đang hủy…"], runner::CANNOT_CANCEL]
+            let transient = [labels::CANCELLING, labels::CANNOT_CANCEL]
                 .into_iter()
                 .find(|status| output.status == text(*status, self.vi));
             if let Some(status) = transient {
@@ -351,10 +364,11 @@ impl Menu {
             } else {
                 output.localize_status(vi);
             }
+            output.render_capture(vi);
         }
         self.vi = vi;
         localization::set_language(vi);
-        self.completer = Completer::new(vi);
+        self.completer.set_language(vi);
         self.refilter();
         if let Some(index) = self
             .items
@@ -362,8 +376,38 @@ impl Menu {
             .position(|entry| selected.is_some_and(|selected| std::ptr::eq(*entry, selected)))
         {
             self.selected = index;
+            self.first = first.min(index);
         }
-        self.open_prompt(Input::default());
+        self.refresh_completion_labels();
+    }
+
+    fn refresh_completion_labels(&mut self) {
+        let Some(prompt) = &mut self.prompt else {
+            return;
+        };
+        let key = |item: &Suggestion| (item.text.clone(), item.insert_range.clone());
+        let focused = prompt.completions.get(prompt.focus).map(key);
+        let accepted = prompt
+            .accepted
+            .as_ref()
+            .and_then(|(index, _)| prompt.completions.get(*index))
+            .map(key);
+        prompt.edited = true;
+        self.refresh_suggestions();
+        let prompt = self.prompt.as_mut().expect("prompt is active");
+        let index_of = |identity: &(String, Range<usize>)| {
+            prompt.completions.iter().position(|candidate| {
+                candidate.text == identity.0 && candidate.insert_range == identity.1
+            })
+        };
+        prompt.focus = focused.as_ref().and_then(index_of).unwrap_or(0);
+        if let Some((_, base)) = prompt.accepted.take() {
+            if let Some(index) = accepted.as_ref().and_then(index_of) {
+                prompt.accepted = Some((index, base));
+            } else {
+                prompt.edited = true;
+            }
+        }
     }
 
     fn refresh_suggestions(&mut self) {
@@ -371,7 +415,10 @@ impl Menu {
             return;
         };
         prompt.edited = false;
-        let input = &prompt.input;
+        let input = prompt
+            .accepted
+            .as_ref()
+            .map_or(&prompt.input, |(_, base)| base);
         prompt.completions = if input.value.is_empty() {
             self.output
                 .is_none()
@@ -412,7 +459,7 @@ impl Menu {
                     insert_range: input.cursor..input.cursor,
                     label: recommendation.into(),
                     kind: Kind::Option,
-                    description: text(["Recommended action", "Thao tác gợi ý"], self.vi).into(),
+                    description: text(labels::RECOMMENDED, self.vi).into(),
                     source: Source::Menu,
                 },
             );
@@ -433,11 +480,11 @@ impl Menu {
             } else {
                 Vec::new()
             };
-            for entry in self
+            for (entry, origin) in self
                 .history
-                .iter()
+                .entries()
                 .rev()
-                .filter(|entry| entry.starts_with(&input.value) && *entry != &input.value)
+                .filter(|(entry, _)| entry.starts_with(&input.value) && *entry != input.value)
             {
                 if prompt.completions.len() >= SUGGESTION_LIMIT {
                     break;
@@ -452,11 +499,18 @@ impl Menu {
                     continue;
                 }
                 prompt.completions.push(Suggestion {
-                    text: entry.clone(),
+                    text: entry.to_owned(),
                     insert_range: 0..input.value.len(),
-                    label: entry.clone(),
+                    label: entry.to_owned(),
                     kind: Kind::History,
-                    description: text(["Recent command", "Lệnh gần đây"], self.vi).into(),
+                    description: text(
+                        match origin {
+                            Origin::Cnl => labels::RECENT_CNL,
+                            Origin::Native => labels::RECENT_NATIVE,
+                        },
+                        self.vi,
+                    )
+                    .into(),
                     source: Source::History,
                 });
             }
@@ -532,33 +586,16 @@ impl Menu {
         prompt.accepted = Some((index, base));
         prompt.focus = index;
         prompt.error = None;
-        self.history_index = None;
+        self.history.reset_navigation();
         Effect::Redraw
     }
 
     fn history_move(&mut self, older: bool, prefix: bool) -> Effect {
-        if self.history.is_empty() || (!older && self.history_index.is_none()) {
-            return Effect::Idle;
-        }
         let prompt = self.prompt.as_mut().expect("prompt is active");
-        if self.history_index.is_none() {
-            self.history_draft.clone_from(&prompt.input);
-        }
-        self.history_index = if older {
-            let before = self.history_index.unwrap_or(self.history.len());
-            let matches = |entry: &String| !prefix || entry.starts_with(&self.history_draft.value);
-            let Some(index) = self.history[..before].iter().rposition(matches) else {
-                return Effect::Idle;
-            };
-            Some(index)
-        } else {
-            self.history_index
-                .and_then(|index| (index + 1 < self.history.len()).then_some(index + 1))
+        let Some(input) = self.history.navigate(&prompt.input, older, prefix) else {
+            return Effect::Idle;
         };
-        prompt.input = self.history_index.map_or_else(
-            || self.history_draft.clone(),
-            |index| Input::at_end(self.history[index].clone()),
-        );
+        prompt.input = input;
         prompt.changed();
         Effect::Redraw
     }
@@ -581,18 +618,16 @@ impl Menu {
             && completion::grammar().find_subcommand(first).is_none()
         {
             if self.output.as_ref().is_some_and(|output| output.running) {
-                prompt.error = Some(["A command is still running.", "Một lệnh đang chạy."]);
+                prompt.error = Some(labels::RUN_IN_PROGRESS);
                 return Effect::Redraw;
             }
             let native = prompt.input.value.clone();
+            self.history.record_native(&native);
             self.close_main_prompt();
             return Effect::Native(native);
         }
         let Ok(mut args) = completion::arguments(&prompt.input.value) else {
-            prompt.error = Some([
-                "Close the quoted argument.",
-                "Hãy đóng dấu nháy của đối số.",
-            ]);
+            prompt.error = Some(labels::CLOSE_QUOTE);
             return Effect::Redraw;
         };
         if args
@@ -602,17 +637,21 @@ impl Menu {
             args.remove(0);
         }
         if let Some(vi) = crate::cli::local_terminal_language(&args) {
+            let restored = self.history.restore_draft().unwrap_or_default();
+            self.open_prompt(restored);
             self.switch_language(vi);
             return Effect::Redraw;
         }
         if self.output.as_ref().is_some_and(|output| output.running) {
-            prompt.error = Some(["A command is still running.", "Một lệnh đang chạy."]);
+            prompt.error = Some(labels::RUN_IN_PROGRESS);
             return Effect::Redraw;
         }
         if args.len() == 1 && args[0] == "clear" {
             if let Some(output) = &mut self.output {
                 output.buffer = Buffer::default();
+                output.captured = None;
                 output.scroll = 0;
+                output.scroll_anchor = None;
                 output.follow = false;
                 output.hit = None;
             }
@@ -620,20 +659,11 @@ impl Menu {
             return Effect::Redraw;
         }
         if args.is_empty() || args[0] == "tui" {
-            prompt.error = Some(["Enter a CIRNETLAB command.", "Nhập một lệnh CIRNETLAB."]);
+            prompt.error = Some(labels::ENTER_CNL_COMMAND);
             return Effect::Redraw;
         }
-        if safe_history(&args) {
-            let command = prompt.input.value.trim().to_owned();
-            if self.history.last() != Some(&command) {
-                self.history.push(command);
-                if self.history.len() > HISTORY_LIMIT {
-                    self.history.remove(0);
-                }
-            }
-        }
-        self.history_index = None;
-        self.history_draft = Input::default();
+        self.history.record_cnl(&prompt.input.value, &args);
+        self.history.reset_navigation();
         self.prompt = None;
         Effect::Run(args)
     }
@@ -667,7 +697,9 @@ impl Menu {
         }
         if prompt.input.value != previous || prompt.error != Some(COMMAND_TOO_LONG) {
             prompt.changed();
-            self.history_index = None;
+            if prompt.input.value != previous {
+                self.history.reset_navigation();
+            }
         }
         Effect::Redraw
     }
@@ -743,6 +775,10 @@ impl Menu {
         if key.kind == KeyEventKind::Release {
             return Effect::Idle;
         }
+        if key.code == KeyCode::F(8) && key.modifiers == KeyModifiers::NONE {
+            self.switch_language(!self.vi);
+            return Effect::Redraw;
+        }
         if let Some(effect) = self.interaction_key(key, clipboard) {
             return effect;
         }
@@ -751,6 +787,19 @@ impl Menu {
                 return self.cancel_output();
             }
             return Effect::Exit;
+        }
+        if key.code == KeyCode::Esc
+            && !self.interaction.read_focus
+            && self
+                .output
+                .as_ref()
+                .is_none_or(|output| output.find.is_none())
+            && let Some(prompt) = &mut self.prompt
+            && let Some(draft) = self.history.restore_draft()
+        {
+            prompt.input = draft;
+            prompt.changed();
+            return Effect::Redraw;
         }
         if self.output.is_some() {
             return self.handle_output(key);
@@ -838,7 +887,7 @@ impl Menu {
 
     fn cancel_output(&mut self) -> Effect {
         if let Some(output) = &mut self.output {
-            output.status = text(["Cancelling…", "Đang hủy…"], self.vi).into();
+            output.status = text(labels::CANCELLING, self.vi).into();
             output.tone = Tone::Warning;
         }
         Effect::Cancel
@@ -876,54 +925,11 @@ impl Menu {
     }
 }
 
-fn safe_history(args: &[String]) -> bool {
-    // Keep only known command tokens and flag values. Paths and arbitrary
-    // arguments may contain credentials and should not be echoed or recalled.
-    let words = [
-        "doctor",
-        "env",
-        "show",
-        "check",
-        "set",
-        "setup",
-        "repos",
-        "discover",
-        "status",
-        "clone",
-        "update",
-        "build",
-        "run",
-        "dev",
-        "stop",
-        "verify",
-        "help",
-        "interface",
-        "en",
-        "vi",
-    ];
-    args.iter().all(|arg| {
-        words.contains(&arg.as_str())
-            || crate::workspace::Repo::KEYS.contains(&arg.as_str())
-            || [
-                "--all",
-                "--repo",
-                "--offline",
-                "--dry-run",
-                "--initialize-db",
-                "--open",
-                "--desktop",
-                "--help",
-                "--version",
-                "--json",
-                "--lang",
-                "--browser",
-            ]
-            .contains(&arg.as_str())
-    })
-}
-
 fn output_title(args: &[String]) -> String {
-    if safe_history(args) {
+    if args.is_empty() {
+        return "cnl".into();
+    }
+    if history::safe_cnl(args) {
         return format!("cnl {}", args.join(" "));
     }
     args.iter()
@@ -935,15 +941,8 @@ fn output_title(args: &[String]) -> String {
         .map_or_else(|| "cnl".into(), |command| format!("cnl {command}"))
 }
 
-fn read_events(batch: &mut Vec<Event>, running: bool) -> io::Result<()> {
+fn read_events(batch: &mut Vec<Event>, timeout: Option<Duration>) -> io::Result<()> {
     batch.clear();
-    let timeout = if running {
-        Some(Duration::from_millis(16))
-    } else if cfg!(windows) {
-        Some(Duration::from_millis(120))
-    } else {
-        None
-    };
     if let Some(timeout) = timeout
         && !event::poll(timeout)?
     {
@@ -1020,21 +1019,27 @@ fn show(
     let mut paste_continuation = 0;
     let mut clipboard = SystemClipboard;
     let animate = color && std::env::var_os("CNL_REDUCED_MOTION").is_none();
+    let glow_supported = painter.supports_input_animation(color, true);
+    let mut glow_cadence = animation::Cadence::new(Instant::now());
+    let mut glowing = false;
     loop {
+        if menu.completer.metadata_ready()
+            && menu
+                .prompt
+                .as_ref()
+                .is_some_and(|prompt| prompt.accepted.is_none() && prompt.error.is_none())
+        {
+            menu.refresh_completion_labels();
+            redraw = true;
+        }
         if let Some(worker) = &mut running {
             worker.set_language(menu.vi);
             let update = worker.poll()?;
             if let Some(output) = &mut menu.output {
-                if let Some(buffer) = update.buffer {
-                    output.buffer = buffer;
-                    if !output.query.is_empty() {
-                        output.last_page = output
-                            .buffer
-                            .layout(output.width)
-                            .saturating_sub(output.page_size.max(1));
-                        output.hit = None;
-                        output.search(false);
-                    }
+                if let Some(captured) = update.captured {
+                    menu.interaction.invalidate_output_selection();
+                    output.captured = Some(captured);
+                    output.render_capture(menu.vi);
                     redraw = true;
                 }
                 if let Some(result) = update.result {
@@ -1053,7 +1058,28 @@ fn show(
                 color,
             )?;
         }
-        read_events(&mut batch, running.is_some())?;
+        let now = Instant::now();
+        let glow_allowed = running.is_none() && glow_supported && painter.has_animated_input(size);
+        if !glow_allowed {
+            if glowing {
+                painter.animate_input(&mut screen.out, None)?;
+                glowing = false;
+            }
+            glow_cadence.suspend(now);
+        }
+        let timeout = [
+            running.is_some().then_some(Duration::from_millis(16)),
+            menu.completer
+                .metadata_pending()
+                .then_some(Duration::from_millis(50)),
+            cfg!(windows)
+                .then(|| Duration::from_millis(120).saturating_sub(last_size_check.elapsed())),
+            glow_allowed.then(|| glow_cadence.remaining(now)),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        read_events(&mut batch, timeout)?;
         redraw = false;
         if batch
             .iter()
@@ -1065,7 +1091,16 @@ fn show(
             if new_size.0 > 0 && new_size.1 > 0 && new_size != size {
                 size = new_size;
                 redraw = true;
+                glow_cadence.suspend(Instant::now());
             }
+        }
+        if batch.is_empty()
+            && !redraw
+            && glow_allowed
+            && let Some(phase) = glow_cadence.step(Instant::now())
+        {
+            painter.animate_input(&mut screen.out, Some(phase))?;
+            glowing = true;
         }
 
         let pending = std::mem::take(&mut paste_continuation);
@@ -1140,6 +1175,8 @@ fn show(
                             io::stdout().lock(),
                         ))?;
                         painter = Painter::default();
+                        glowing = false;
+                        glow_cadence.suspend(Instant::now());
                         size = console::size()?;
                         menu.output
                             .as_mut()
@@ -1181,19 +1218,34 @@ fn native_shell_request(args: &[String]) -> Option<Option<String>> {
 
 pub fn open(workspace: &Workspace, flags: &ArgMatches) -> anyhow::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        anyhow::bail!(
-            "{}",
-            crate::localization::message([
-                "cnl tui requires an interactive terminal",
-                "cnl tui yêu cầu terminal tương tác"
-            ])
-        );
+        anyhow::bail!("{}", localization::message(labels::INTERACTIVE_REQUIRED));
     }
     let vi = flags
         .get_one::<String>("lang")
         .is_some_and(|language| language == "vi");
     let mut menu = Menu::new(vi);
+    let history_state = if flags.get_flag("persist-history") {
+        Some(crate::environment::State::resolve(
+            workspace,
+            flags
+                .get_one::<std::path::PathBuf>("state-dir")
+                .map(std::path::PathBuf::as_path),
+            flags.get_one::<String>("profile").expect("default profile"),
+        )?)
+    } else {
+        None
+    };
+    if let Some(state) = &history_state {
+        menu.history = History::load(&state.dir).map_err(|_| {
+            anyhow::anyhow!("{}", localization::message(labels::HISTORY_READ_FAILED))
+        })?;
+    }
     show(&mut menu, terminal::color_enabled(), true, workspace, flags)?;
+    if let Some(state) = &history_state {
+        menu.history.save(&state.dir).map_err(|_| {
+            anyhow::anyhow!("{}", localization::message(labels::HISTORY_WRITE_FAILED))
+        })?;
+    }
     Ok(())
 }
 
@@ -1266,7 +1318,7 @@ mod state_tests {
     #[test]
     fn language_switch_is_local_and_keeps_active_output_and_history() {
         let mut menu = Menu::new(false);
-        menu.history.push("status".into());
+        menu.history.record_cnl("status", &["status".into()]);
         menu.begin_output(&["build".into(), "--all".into()]);
         menu.output.as_mut().unwrap().buffer =
             Buffer::from_streams("native work in flight".into(), "", None);
@@ -1274,7 +1326,10 @@ mod state_tests {
             menu.open_prompt(Input::at_end(command.into()));
             assert!(matches!(menu.handle(key(KeyCode::Enter)), Effect::Redraw));
             assert_eq!(menu.vi, vi);
-            assert_eq!(menu.history, ["status"]);
+            assert_eq!(
+                menu.history.entries().collect::<Vec<_>>(),
+                [("status", Origin::Cnl)]
+            );
             let output = menu.output.as_mut().unwrap();
             assert!(output.running);
             assert_eq!(output.status, text(["Running…", "Đang chạy…"], vi));
@@ -1288,6 +1343,61 @@ mod state_tests {
         menu.open_prompt(Input::at_end("status".into()));
         assert!(matches!(menu.submit_prompt(), Effect::Redraw));
         assert!(menu.output.as_ref().unwrap().running);
+    }
+
+    #[test]
+    fn native_history_shares_navigation_and_restores_an_edited_draft() {
+        let mut menu = Menu::new(false);
+        for command in ["status", "git status --short"] {
+            menu.open_prompt(Input::at_end(command.into()));
+            assert!(matches!(
+                menu.submit_prompt(),
+                Effect::Run(_) | Effect::Native(_)
+            ));
+        }
+        menu.open_prompt(Input::at("git sẵn sàng".into(), 3));
+        assert!(matches!(menu.handle(key(KeyCode::Up)), Effect::Redraw));
+        assert_eq!(
+            menu.prompt.as_ref().unwrap().input.value,
+            "git status --short"
+        );
+        assert!(matches!(menu.handle(key(KeyCode::Down)), Effect::Redraw));
+        let draft = &menu.prompt.as_ref().unwrap().input;
+        assert_eq!(draft.value, "git sẵn sàng");
+        assert_eq!(draft.cursor, 3);
+    }
+
+    #[test]
+    fn switching_language_preserves_an_active_draft_selection_and_output_scroll() {
+        let mut menu = Menu::new(false);
+        menu.begin_output(&["status".into()]);
+        menu.output.as_mut().unwrap().scroll = 7;
+        let mut draft = Input::at("git trạng thái".into(), 3);
+        draft.move_to(0, true);
+        menu.open_prompt(draft);
+        assert!(matches!(menu.handle(key(KeyCode::F(8))), Effect::Redraw));
+        let draft = &menu.prompt.as_ref().unwrap().input;
+        assert_eq!(draft.selected_text(), Some("git"));
+        assert_eq!(menu.output.as_ref().unwrap().scroll, 7);
+        assert!(menu.vi);
+    }
+
+    #[test]
+    fn output_scroll_keeps_its_source_anchor_through_reflow() {
+        let mut output = OutputView::new("test".into(), false);
+        output.buffer = Buffer::from_streams(
+            ("CIRNETLAB tiếng Việt ".repeat(30) + "\n").repeat(4),
+            "",
+            None,
+        );
+        output.layout(13, 4);
+        output.scroll_to(9, false);
+        let anchor = output.scroll_anchor;
+        for width in [36, 1, 170, 7, 90, 13] {
+            output.layout(width, 4);
+            assert_eq!(output.scroll_anchor, anchor);
+        }
+        assert_eq!(output.scroll, 9);
     }
 
     #[test]
