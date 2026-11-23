@@ -24,7 +24,7 @@ use self::{
 use crate::workspace::Workspace;
 use clap::ArgMatches;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind},
     terminal as console,
 };
 use std::io::IsTerminal;
@@ -1081,6 +1081,16 @@ fn show(
         .min();
         read_events(&mut batch, timeout)?;
         redraw = false;
+        if glow_allowed
+            && batch.iter().any(|event| match event {
+                Event::Key(key) => key.kind != KeyEventKind::Release,
+                Event::Mouse(mouse) => mouse.kind != MouseEventKind::Moved,
+                Event::Paste(_) => true,
+                _ => false,
+            })
+        {
+            glow_cadence.suspend(Instant::now());
+        }
         if batch
             .iter()
             .any(|event| matches!(event, Event::Resize(_, _)))

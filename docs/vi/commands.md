@@ -117,7 +117,7 @@ cnl verify --repo cli
 
 Dùng phím mũi tên để điều hướng, `/` để lọc menu, `:` để nhập lệnh, Tab hoặc Shift+Tab để duyệt gợi ý và `?` để xem trợ giúp. Trong ô nhập lệnh, phím lên và xuống gọi lại các lệnh đủ điều kiện. Ctrl+R tìm lệnh cũ theo phần đã nhập. Esc thoát lịch sử và khôi phục bản nháp. Page Up và Page Down cuộn đầu ra, Ctrl+F tìm nội dung, F3 chuyển đến kết quả tiếp theo. Nhập `clear` trong TUI để xóa phần kết quả đang hiển thị. Dùng `cnl stop` để dừng ứng dụng.
 
-Rê chuột lên mục gợi ý để tô sáng. Bấm để chèn mục vào vị trí nhập và nhấn Enter để chạy lệnh. Nhấp chuột phải hoặc nhấn Shift+F10 để mở menu ngữ cảnh. Nhấn F8 để đổi giữa tiếng Anh và tiếng Việt mà vẫn giữ bản nháp và kết quả hiện tại. Bạn cũng có thể nhập `cnl --lang vi` hoặc `cnl --lang en`. Viền ô nhập có hiệu ứng chuyển động trên terminal hỗ trợ True Color. Đặt `CNL_REDUCED_MOTION=1` để tắt hiệu ứng viền và hiệu ứng chờ, hoặc `NO_COLOR=1` để dùng chế độ đơn sắc.
+Rê chuột lên mục gợi ý để tô sáng. Bấm để chèn mục vào vị trí nhập và nhấn Enter để chạy lệnh. Nhấp chuột phải hoặc nhấn Shift+F10 để mở menu ngữ cảnh. Nhấn F8 để đổi giữa tiếng Anh và tiếng Việt mà vẫn giữ bản nháp và kết quả hiện tại. Bạn cũng có thể nhập `cnl --lang vi` hoặc `cnl --lang en`. Trên terminal hỗ trợ True Color, dải sáng màu đồng lướt nhẹ dọc viền ô nhập và tạm dừng khi bạn chỉnh sửa. Đặt `CNL_REDUCED_MOTION=1` để tắt hiệu ứng viền và hiệu ứng chờ, hoặc `NO_COLOR=1` để dùng chế độ đơn sắc.
 
 Nhập lệnh native trực tiếp, ví dụ `git status` hoặc `Get-ChildItem | Select-Object -First 5` trên Windows. Mỗi lệnh chạy trong tiến trình riêng. Dùng `cnl shell` nếu cần giữ thay đổi thư mục làm việc hoặc biến môi trường qua nhiều lệnh native. Nhập `exit` trong shell để trở lại TUI.
 

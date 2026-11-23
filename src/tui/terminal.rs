@@ -12,8 +12,14 @@ use std::{
     io::{self, Write},
     ops::Range,
     rc::Rc,
+    time::Duration,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+use super::animation::{SWEEP_LEVELS, Sweep};
+
+const INPUT_RIM_RGB: (u8, u8, u8) = (78, 80, 86);
+const COPPER_RGB: (u8, u8, u8) = (196, 145, 117);
 
 const ORANGE: Color = Color::Rgb {
     r: 211,
@@ -216,19 +222,24 @@ impl Style {
         use Color::*;
         use PalettePart::*;
         let suggestions = depth.color((31, 33, 37), 235, DarkGrey);
-        let input_rim = depth.color((78, 80, 86), 240, DarkGrey);
+        let input_rim = depth.color(INPUT_RIM_RGB, 240, DarkGrey);
         let (color, background) = match part {
             InputRim => (input_rim, None),
             InputEdge => (input_rim, None),
             InputGlow(strength) => {
-                let rgb = match strength {
-                    6 => (255, 192, 143),
-                    5 => (226, 146, 97),
-                    4 => (194, 119, 80),
-                    3 => (157, 100, 76),
-                    2 => (124, 84, 73),
-                    _ => (97, 79, 77),
+                let amount = u16::from(strength.min(SWEEP_LEVELS));
+                let levels = u16::from(SWEEP_LEVELS);
+                let blend = |base: u8, copper: u8| {
+                    ((u16::from(base) * (levels - amount)
+                        + u16::from(copper) * amount
+                        + levels / 2)
+                        / levels) as u8
                 };
+                let rgb = (
+                    blend(INPUT_RIM_RGB.0, COPPER_RGB.0),
+                    blend(INPUT_RIM_RGB.1, COPPER_RGB.1),
+                    blend(INPUT_RIM_RGB.2, COPPER_RGB.2),
+                );
                 (depth.color(rgb, 240, DarkGrey), None)
             }
             // A box-drawing cell cannot combine a third color outside its
@@ -477,31 +488,12 @@ pub(super) struct InputBorder {
 }
 
 impl InputBorder {
-    // A clockwise trail. The lightly colored neighbor ahead softens the leading point.
-    const GLOW: [(isize, u8); 8] = [
-        (-6, 1),
-        (-5, 2),
-        (-4, 3),
-        (-3, 4),
-        (-2, 5),
-        (-1, 5),
-        (0, 6),
-        (1, 2),
-    ];
-
     fn length(self) -> usize {
         usize::from(self.width) * 2 + 2
     }
 
-    fn glow(self, phase: usize) -> impl Iterator<Item = (usize, u8)> + Clone {
-        let length = self.length();
-        let phase = (phase % length) as isize;
-        Self::GLOW.into_iter().map(move |(offset, strength)| {
-            (
-                (phase + offset).rem_euclid(length as isize) as usize,
-                strength,
-            )
-        })
+    fn sweep(self, phase: Duration) -> Sweep {
+        Sweep::new(phase, self.length())
     }
 
     fn cell(self, index: usize) -> (u16, u16, &'static str, PalettePart) {
@@ -578,7 +570,7 @@ impl Frame {
 pub(super) struct Painter {
     previous: Option<Frame>,
     depth: SemanticDepth,
-    input_phase: Option<usize>,
+    input_phase: Option<Duration>,
 }
 
 impl Default for Painter {
@@ -612,7 +604,7 @@ impl Painter {
     pub(super) fn animate_input(
         &mut self,
         out: &mut impl Write,
-        phase: Option<usize>,
+        phase: Option<Duration>,
     ) -> io::Result<()> {
         let Some(frame) = &self.previous else {
             return Ok(());
@@ -627,17 +619,17 @@ impl Painter {
             return Ok(());
         }
         let mut active = Style::default();
-        let previous = self.input_phase.into_iter().flat_map(|p| border.glow(p));
-        let next = phase.into_iter().flat_map(|p| border.glow(p));
+        let previous = self.input_phase.map(|p| border.sweep(p));
+        let next = phase.map(|p| border.sweep(p));
         let mut written = false;
-        for (cell, _) in previous.clone() {
-            if !next.clone().any(|(index, _)| index == cell) {
+        for (cell, _) in previous.into_iter().flat_map(Sweep::cells) {
+            if next.is_none_or(|sweep| sweep.strength(cell) == 0) {
                 self.paint_input_cell(out, border, cell, None, &mut active)?;
                 written = true;
             }
         }
-        for (cell, strength) in next {
-            if !previous.clone().any(|old| old == (cell, strength)) {
+        for (cell, strength) in next.into_iter().flat_map(Sweep::cells) {
+            if previous.is_none_or(|sweep| sweep.strength(cell) != strength) {
                 self.paint_input_cell(out, border, cell, Some(strength), &mut active)?;
                 written = true;
             }
@@ -690,7 +682,7 @@ impl Painter {
             && let Some(phase) = self.input_phase.take()
             && let Some(border) = old_border.filter(|_| !resized)
         {
-            for (cell, _) in border.glow(phase) {
+            for (cell, _) in border.sweep(phase).cells() {
                 self.paint_input_cell(out, border, cell, None, &mut active)?;
             }
             changed = true;
@@ -756,7 +748,7 @@ impl Painter {
                 }
             }
             if let Some((border, phase, columns)) = covered {
-                for (cell, strength) in border.glow(phase) {
+                for (cell, strength) in border.sweep(phase).cells() {
                     let (x, row, _, _) = border.cell(cell);
                     if row == y && columns.contains(&x) {
                         self.paint_input_cell(out, border, cell, Some(strength), &mut active)?;
@@ -883,7 +875,10 @@ mod tests {
             .unwrap();
         let initial_bytes = bytes.len();
         assert!(painter.has_animated_input(size));
-        let border = painter.last_frame(size).unwrap().input_border.unwrap();
+        let frame = painter.last_frame(size).unwrap();
+        let border = frame.input_border.unwrap();
+        let (x, y) = frame.cursor.unwrap();
+        let cursor_restore = format!("\x1b[{};{}H", y + 1, x + 1);
         assert!(border.width > 100);
         let changed_cells = |bytes: &[u8]| {
             let trace = std::str::from_utf8(bytes).unwrap();
@@ -897,30 +892,34 @@ mod tests {
                 !trace.contains("\x1b[?25h") && !trace.contains("\x1b[?25l"),
                 "{trace:?}"
             );
+            assert!(trace.ends_with(&cursor_restore), "{trace:?}");
             trace.chars().filter(|ch| "╭─╮│╰╯".contains(*ch)).count()
         };
-        let phase = usize::from(border.width) - 1;
+        let speed = crate::tui::animation::SWEEP_SPEED;
+        let phase = Duration::from_secs_f64(f64::from(border.width - 1) / speed);
+        let next_phase = phase + Duration::from_millis(42);
         bytes.clear();
         painter.animate_input(&mut bytes, Some(phase)).unwrap();
-        assert_eq!(changed_cells(&bytes), 8);
+        assert!((12..=22).contains(&changed_cells(&bytes)));
         assert!(
             std::str::from_utf8(&bytes)
                 .unwrap()
-                .contains("\x1b[38;2;255;192;143m╮")
+                .contains("\x1b[38;2;196;145;117m╮")
         );
         bytes.clear();
-        painter.animate_input(&mut bytes, Some(phase + 2)).unwrap();
-        assert_eq!(changed_cells(&bytes), 10);
+        painter.animate_input(&mut bytes, Some(next_phase)).unwrap();
+        let changed = changed_cells(&bytes);
+        assert!((1..=24).contains(&changed));
         eprintln!(
-            "180×30 first frame {initial_bytes} bytes; steady glow tick {} bytes, 10 cells",
+            "180×30 first frame {initial_bytes} bytes; steady sweep tick {} bytes, {changed} cells",
             bytes.len()
         );
         bytes.clear();
-        painter.animate_input(&mut bytes, Some(phase + 2)).unwrap();
+        painter.animate_input(&mut bytes, Some(next_phase)).unwrap();
         assert!(bytes.is_empty());
         painter.animate_input(&mut bytes, None).unwrap();
-        assert_eq!(changed_cells(&bytes), 8);
-        assert!(!std::str::from_utf8(&bytes).unwrap().contains("255;192;143"));
+        assert!((12..=22).contains(&changed_cells(&bytes)));
+        assert!(!std::str::from_utf8(&bytes).unwrap().contains("196;145;117"));
         bytes.clear();
         painter
             .draw(
@@ -930,6 +929,35 @@ mod tests {
             )
             .unwrap();
         assert!(!painter.has_animated_input((17, 3)));
+    }
+
+    #[test]
+    fn copper_sweep_has_no_hard_change_between_adjacent_cells() {
+        for width in [9, 18, 40, 84, 178] {
+            let border = InputBorder {
+                left: 2,
+                top: 1,
+                width,
+            };
+            let mut colors = vec![INPUT_RIM_RGB.0; border.length()];
+            for (index, strength) in border.sweep(Duration::from_millis(133)).cells() {
+                let tone = Style::palette(PalettePart::InputGlow(strength), SemanticDepth::Rgb);
+                if let Some(Color::Rgb { r, .. }) = tone.color {
+                    colors[index] = r;
+                }
+            }
+            let steepest = colors
+                .iter()
+                .copied()
+                .zip(colors.iter().copied().cycle().skip(1))
+                .map(|(left, right)| left.abs_diff(right))
+                .max()
+                .unwrap();
+            assert!(
+                steepest <= 26,
+                "{width} columns: neighboring cells change by {steepest}"
+            );
+        }
     }
 
     #[test]

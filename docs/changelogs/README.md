@@ -16,6 +16,7 @@
 - Localize nested reports and switch the TUI language with F8 while editing or reading output.
 - Share bounded command history across views and let users save eligible CNL history for a profile.
 - Add local Git and native shell suggestions, responsive layouts and a reduced-motion-aware input border.
+- Soften the copper input border sweep and pause its motion while editing.
 
 ### Tiếng Việt
 
@@ -31,3 +32,4 @@
 - Bản địa hóa báo cáo lồng nhau và hỗ trợ phím F8 để đổi ngôn ngữ TUI khi đang nhập hoặc đọc kết quả.
 - Dùng chung lịch sử lệnh có giới hạn giữa các màn hình và cho phép lưu lệnh CNL đủ điều kiện vào hồ sơ.
 - Bổ sung gợi ý Git và shell native từ dữ liệu cục bộ, bố cục linh hoạt và hiệu ứng viền ô nhập có thể tắt.
+- Làm dịu dải sáng màu đồng trên viền ô nhập và tạm dừng hiệu ứng khi chỉnh sửa.
