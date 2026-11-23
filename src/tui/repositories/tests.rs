@@ -417,6 +417,25 @@ fn path_copy_and_refresh_keep_display_separate_from_checkout_identity() {
 }
 
 #[test]
+fn repository_table_uses_the_removed_column_space_for_local_paths() {
+    let path = r"E:\fixtures\cirnet-cli";
+    let mut repo = row(0);
+    repo.path = Some(PathBuf::from(path));
+    let mut dashboard = Dashboard::new(false, false);
+    dashboard.replace_rows(vec![repo]);
+    let frame = dashboard.frame((118, 24));
+
+    let y = frame.menu.as_ref().unwrap().rows.start;
+    let header = frame.rows[usize::from(y - 1)].contents();
+    let first = frame.rows[usize::from(y)].contents();
+    assert!(first.contains(path), "path was shortened: {first}");
+    assert!(header.contains("Local path"));
+    assert!(!header.contains("↑ / ↓"));
+    assert!(!first.contains("0↑ 0↓"));
+    assert_eq!(dashboard.table_hits.path.len(), 27);
+}
+
+#[test]
 fn table_uses_short_hash_and_details_wrap_commit_metadata() {
     let mut repo = row(0);
     repo.commit_message = Some("A meaningful commit message with a second line".into());

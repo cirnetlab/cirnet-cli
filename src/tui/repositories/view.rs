@@ -188,7 +188,6 @@ enum Field {
     State,
     Branch,
     Path,
-    Divergence,
     Revision,
     Source,
 }
@@ -198,7 +197,7 @@ struct Columns {
     name: usize,
     viewport: usize,
     offset: usize,
-    fields: [(Field, usize); 6],
+    fields: [(Field, usize); 5],
 }
 
 impl Columns {
@@ -212,17 +211,14 @@ impl Columns {
         let mut fields = [
             (Field::State, 19),
             (Field::Branch, 12),
-            (Field::Path, 18),
-            (Field::Divergence, 9),
+            (Field::Path, 27),
             (Field::Revision, 13),
             (Field::Source, 12),
         ];
         let extra = viewport.saturating_sub(fields.iter().map(|(_, width)| width).sum());
         let branch = (extra / 3).min(10);
-        let divergence = ((extra - branch) / 4).min(5);
         fields[1].1 += branch;
-        fields[2].1 += extra - branch - divergence;
-        fields[3].1 += divergence;
+        fields[2].1 += extra - branch;
         let mut columns = Self {
             checkbox,
             name,
@@ -278,7 +274,6 @@ impl Columns {
                 Field::State => tr(vi, "Git status", "Trạng thái Git"),
                 Field::Branch => tr(vi, "Branch", "Nhánh"),
                 Field::Path => tr(vi, "Local path", "Đường dẫn"),
-                Field::Divergence => "↑ / ↓",
                 Field::Revision => tr(vi, "Last commit", "Commit cuối"),
                 Field::Source => tr(vi, "Source", "Nguồn"),
             };
@@ -316,7 +311,6 @@ impl Columns {
         };
         for (field, width, visible) in self.visible_fields() {
             let full_path;
-            let delta;
             let (style, value) = match field {
                 Field::State => (tone, status),
                 Field::Branch => (Tone::Key, branch),
@@ -324,10 +318,6 @@ impl Columns {
                     full_path =
                         shorten_path(row.display_path().as_deref().unwrap_or("—"), width - 1);
                     (Tone::Path, full_path.as_str())
-                }
-                Field::Divergence => {
-                    delta = divergence(row);
-                    (Tone::Muted, delta.as_str())
                 }
                 Field::Revision => (Tone::Muted, row.short_revision.as_deref().unwrap_or("—")),
                 Field::Source => (Tone::Muted, source(row, vi, true)),

@@ -19,6 +19,7 @@
 - Soften the copper input border sweep and pause its motion while editing.
 - Add a workspace repository registry, cached GitHub discovery, parallel Git synchronization, and a dashboard with persistent repository terminals.
 - Show verified Git metadata and readable paths in Repository Manager. Add hierarchical navigation, shared CNL command entry, and a split terminal workspace with a session list.
+- Widen Local path by removing the ahead and behind column from the repository table.
 
 ### Tiếng Việt
 
@@ -37,3 +38,4 @@
 - Làm dịu dải sáng màu đồng trên viền ô nhập và tạm dừng hiệu ứng khi chỉnh sửa.
 - Thêm danh bạ repo theo workspace, khám phá GitHub qua cache, đồng bộ Git song song và bảng quản lý có terminal riêng cho từng repo.
 - Hiển thị dữ liệu Git đã kiểm chứng và đường dẫn dễ đọc trong trình quản lý repo. Thêm điều hướng theo cấp, ô lệnh CNL dùng chung và terminal chia khung với danh sách phiên.
+- Mở rộng cột đường dẫn cục bộ bằng cách bỏ cột đi trước và đi sau khỏi bảng quản lý repo.

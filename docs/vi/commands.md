@@ -104,7 +104,7 @@ Dùng `--yes` để xác nhận clone, thêm hoặc gỡ hàng loạt sau khi xe
 | `cnl repos branch <REPO> <BRANCH> [--switch]` · `cnl repos worktree <REPO> <PATH> --branch <BRANCH>` | Tạo hoặc chuyển nhánh, hoặc thêm worktree cho nhánh có sẵn. |
 | `cnl repos stage <REPO> <PATH>...` · `cnl repos commit <REPO> -m <MESSAGE>` · `cnl repos push <REPO>` | Stage đường dẫn chỉ định, commit phần đã stage hoặc push nhánh theo dõi. Bạn phải gọi rõ từng lệnh. |
 
-Bảng quản lý hiển thị nhánh và trạng thái upstream đã kiểm chứng cùng mã commit rút gọn. Mở Chi tiết hoặc Lịch sử để xem thông tin commit. Dùng `/` để tìm, Space để chọn và `G` để lọc nhóm. Phím trái và phải cuộn bảng theo chiều ngang. Rê chuột lên ô đường dẫn hoặc nhấn `P` để xem đường dẫn đầy đủ. Nhấn `C` để sao chép đường dẫn. Dùng `A` để mở thao tác, kiểm tra danh sách rồi nhấn `Y` để xác nhận. Esc quay về màn hình trước.
+Bảng quản lý hiển thị nhánh, trạng thái Git, đường dẫn cục bộ và mã commit rút gọn. Mở Chi tiết để xem số commit đi trước và đi sau, hoặc mở Lịch sử để xem nhật ký commit. Dùng `/` để tìm, Space để chọn và `G` để lọc nhóm. Phím trái và phải cuộn bảng theo chiều ngang. Rê chuột lên ô đường dẫn hoặc nhấn `P` để xem đường dẫn đầy đủ. Nhấn `C` để sao chép đường dẫn. Dùng `A` để mở thao tác, kiểm tra danh sách rồi nhấn `Y` để xác nhận. Esc quay về màn hình trước.
 
 Nhấn `:` để mở ô lệnh CNL dùng chung lịch sử, gợi ý và điều khiển kết quả với terminal chính. Nhấn `T` để mở terminal của repo đang có tiêu điểm.
 
