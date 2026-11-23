@@ -285,21 +285,21 @@ fn nested_escape_restores_prompt_actions_details_and_table() {
 }
 
 #[test]
-fn compact_horizontal_scroll_leaves_identity_and_vertical_focus_in_place() {
+fn compact_table_ignores_horizontal_arrows() {
     let mut dashboard = populated();
-    let size = (44, 10);
-    let initial = dashboard.frame(size);
+    let initial = dashboard.frame((44, 10));
     let y = initial.menu.as_ref().unwrap().rows.start;
     let before = initial.rows[usize::from(y)].contents();
     assert!(before.contains("repo-000"));
-    assert!(matches!(
-        dashboard.handle(key(KeyCode::Right), Some(&initial)),
-        Effect::Redraw
-    ));
-    let shifted = dashboard.frame(size);
-    assert_ne!(shifted.rows[usize::from(y)].contents(), before);
-    assert!(shifted.rows[usize::from(y)].contents().contains("repo-000"));
-    assert_eq!(shifted.menu.as_ref().unwrap().first, 0);
+    for code in [KeyCode::Right, KeyCode::Left] {
+        assert!(matches!(
+            dashboard.handle(key(code), Some(&initial)),
+            Effect::Idle
+        ));
+    }
+    let after = dashboard.frame(initial.size);
+    assert_eq!(after.rows[usize::from(y)].contents(), before);
+    assert_eq!(after.menu.as_ref().unwrap().first, 0);
 }
 
 #[test]
@@ -337,54 +337,42 @@ fn running_output_requires_cancellation_before_returning_to_the_preview() {
 }
 
 #[test]
-fn scrolled_path_hits_show_the_normalized_path_and_invalidate_after_resize() {
+fn repository_table_has_no_path_tooltip_or_reveal_shortcut() {
     let mut first = row(0);
     first.path = Some(PathBuf::from(
-        r"\\?\UNC\server\share\Vietnamese 東京\repo-000",
+        r"\\?\UNC\server\share\very long folder name 東京\repo-000",
     ));
     let mut dashboard = Dashboard::new(false, false);
     dashboard.replace_rows(vec![first, row(1)]);
-    dashboard.horizontal = 24;
-    let frame = dashboard.frame((64, 12));
+    let frame = dashboard.frame((118, 12));
     let y = frame.menu.as_ref().unwrap().rows.start;
-    let path = dashboard.table_hits.path.clone();
-    assert!(!path.is_empty());
-    assert!(
-        frame.rows[usize::from(y) - 1]
-            .contents()
-            .contains("Local path")
-    );
-    assert!(matches!(
-        dashboard.handle(mouse(MouseEventKind::Moved, path.start, y), Some(&frame)),
-        Effect::Redraw
-    ));
-    let hovered = dashboard.frame(frame.size);
-    let has_full_path = |frame: &Frame| {
-        frame.rows.iter().any(|line| {
-            line.contents()
-                .contains(r"\\server\share\Vietnamese 東京\repo-000")
-        })
-    };
-    assert!(has_full_path(&hovered));
-    assert!(hovered.rows.iter().all(|line| line.contents().width() < 64));
+    let header = frame.rows[usize::from(y - 1)].contents();
+    let path_start = header[..header.find("Local path").unwrap()].width() as u16;
+    for event in [
+        mouse(MouseEventKind::Moved, path_start, y),
+        key(KeyCode::Char('p')),
+    ] {
+        assert!(matches!(
+            dashboard.handle(event, Some(&frame)),
+            Effect::Idle
+        ));
+    }
+
+    let wide = dashboard.frame((160, 12));
+    let footer = wide.rows.last().unwrap().contents();
+    assert!(footer.contains("C Copy"));
+    for removed in ["P Path", "←", "→"] {
+        assert!(!footer.contains(removed));
+    }
+    let frame = dashboard.frame(frame.size);
     assert!(matches!(
         dashboard.handle(
-            mouse(MouseEventKind::Down(MouseButton::Left), path.start, y + 1),
-            Some(&hovered)
+            mouse(MouseEventKind::Down(MouseButton::Left), path_start, y + 1),
+            Some(&frame)
         ),
-        Effect::Idle
+        Effect::Redraw
     ));
-    let resized = dashboard.frame((63, 12));
-    assert!(!has_full_path(&resized));
-    dashboard.handle(key(KeyCode::Char('p')), Some(&resized));
-    let keyboard_tooltip = dashboard.frame(resized.size);
-    assert!(has_full_path(&keyboard_tooltip));
-    assert_eq!(
-        dashboard.focused().unwrap().path.as_deref(),
-        Some(std::path::Path::new(
-            r"\\?\UNC\server\share\Vietnamese 東京\repo-000"
-        ))
-    );
+    assert_eq!(dashboard.focused().unwrap().name, "repo-001");
 }
 
 #[test]
@@ -418,7 +406,7 @@ fn path_copy_and_refresh_keep_display_separate_from_checkout_identity() {
 
 #[test]
 fn repository_table_uses_the_removed_column_space_for_local_paths() {
-    let path = r"E:\fixtures\cirnet-cli";
+    let path = r"E:\fixtures\lab\cirnet-next";
     let mut repo = row(0);
     repo.path = Some(PathBuf::from(path));
     let mut dashboard = Dashboard::new(false, false);
@@ -432,7 +420,13 @@ fn repository_table_uses_the_removed_column_space_for_local_paths() {
     assert!(header.contains("Local path"));
     assert!(!header.contains("↑ / ↓"));
     assert!(!first.contains("0↑ 0↓"));
-    assert_eq!(dashboard.table_hits.path.len(), 27);
+    let state = header.find("Git status").unwrap();
+    let branch = header.find("Branch").unwrap();
+    let path = header.find("Local path").unwrap();
+    let commit = header.find("Last commit").unwrap();
+    assert_eq!(header[state..branch].width(), 15);
+    assert_eq!(header[branch..path].width(), 9);
+    assert!(header[path..commit].width() > 27);
 }
 
 #[test]
@@ -487,7 +481,7 @@ fn colon_requests_the_shared_prompt_without_changing_the_dashboard() {
 }
 
 #[test]
-fn shifted_wheel_and_horizontal_wheel_leave_vertical_position_unchanged() {
+fn table_ignores_horizontal_mouse_scroll_and_preserves_vertical_scroll() {
     let mut dashboard = populated();
     dashboard.focus(20);
     let initial = dashboard.frame((48, 13));
@@ -498,19 +492,23 @@ fn shifted_wheel_and_horizontal_wheel_leave_vertical_position_unchanged() {
         row: 6,
         modifiers: KeyModifiers::SHIFT,
     });
-    assert!(matches!(
-        dashboard.handle(shifted_wheel, Some(&initial)),
-        Effect::Redraw
-    ));
-    assert!(dashboard.horizontal > 0);
-    let shifted = dashboard.frame(initial.size);
-    assert!(matches!(
-        dashboard.handle(mouse(MouseEventKind::ScrollLeft, 20, 6), Some(&shifted)),
-        Effect::Redraw
-    ));
-    assert_eq!(dashboard.horizontal, 0);
+    for event in [
+        shifted_wheel,
+        mouse(MouseEventKind::ScrollLeft, 20, 6),
+        mouse(MouseEventKind::ScrollRight, 20, 6),
+    ] {
+        assert!(matches!(
+            dashboard.handle(event, Some(&initial)),
+            Effect::Idle
+        ));
+    }
     assert_eq!(dashboard.scroll, initial_scroll);
     assert_eq!(dashboard.focused().unwrap().selector, "21");
+    assert!(matches!(
+        dashboard.handle(mouse(MouseEventKind::ScrollDown, 20, 6), Some(&initial)),
+        Effect::Redraw
+    ));
+    assert_eq!(dashboard.focused().unwrap().selector, "24");
 }
 
 #[test]

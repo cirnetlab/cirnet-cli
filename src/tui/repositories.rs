@@ -105,11 +105,8 @@ struct Dashboard {
     selected: Option<String>,
     cursor: usize,
     scroll: usize,
-    horizontal: usize,
     table_hits: TableHits,
     rendered_overlay: Option<std::mem::Discriminant<Overlay>>,
-    hover: Option<String>,
-    path_focus: bool,
     filters: Filters,
     search: Input,
     searching: bool,
@@ -135,11 +132,8 @@ impl Dashboard {
             selected: None,
             cursor: 0,
             scroll: 0,
-            horizontal: 0,
             table_hits: TableHits::default(),
             rendered_overlay: None,
-            hover: None,
-            path_focus: false,
             filters: Filters::default(),
             search: Input::default(),
             searching: false,
@@ -262,12 +256,10 @@ impl Dashboard {
     fn focus(&mut self, index: usize) {
         self.cursor = index.min(self.visible.len().saturating_sub(1));
         self.selected = self.focused().map(|row| row.selector.clone());
-        self.hover = None;
     }
 
     fn clear_table_hits(&mut self) {
         self.table_hits = TableHits::default();
-        self.hover = None;
     }
 
     fn push_overlay(&mut self, next: Overlay) {
@@ -390,7 +382,6 @@ impl Dashboard {
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => self.key(key, &layout),
             Event::Paste(value) => self.paste(&value),
-            Event::FocusLost if self.hover.take().is_some() => Effect::Redraw,
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     let Some(frame) = frame else {
@@ -430,17 +421,12 @@ impl Dashboard {
                     }
                     if let Some(index) = frame.menu_hit(mouse.column, mouse.row) {
                         if matches!(self.overlay, Overlay::None) {
-                            if !self.table_hits.contains_row(frame, mouse.column, mouse.row) {
+                            if self.table_hits.size != Some(frame.size) {
                                 return Effect::Idle;
                             }
                             self.focus(index);
                             if self.table_hits.checkbox.contains(&mouse.column) {
                                 self.toggle(index);
-                            } else if self.table_hits.path.contains(&mouse.column) {
-                                self.hover = self
-                                    .focused()
-                                    .filter(|row| row.path.is_some())
-                                    .map(|row| row.selector.clone());
                             }
                             self.searching = false;
                             return Effect::Redraw;
@@ -455,36 +441,16 @@ impl Dashboard {
                     if matches!(self.overlay, Overlay::None)
                         && let Some(code) = self.table_hits.shortcut(frame, mouse.column, mouse.row)
                     {
-                        return self.table_shortcut(code, &layout);
+                        return self.table_shortcut(code);
                     }
                     Effect::Idle
                 }
-                MouseEventKind::Moved if matches!(self.overlay, Overlay::None) => {
-                    let hover = frame
-                        .filter(|frame| {
-                            self.table_hits.path.contains(&mouse.column)
-                                && self.table_hits.contains_row(frame, mouse.column, mouse.row)
-                        })
-                        .and_then(|frame| frame.menu_hit(mouse.column, mouse.row))
-                        .and_then(|index| self.row(index))
-                        .filter(|row| row.path.is_some())
-                        .map(|row| row.selector.clone());
-                    if self.hover == hover {
-                        return Effect::Idle;
-                    }
-                    self.hover = hover;
-                    Effect::Redraw
+                MouseEventKind::ScrollUp if !mouse.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.move_by(-3)
                 }
-                MouseEventKind::ScrollLeft => self.scroll_horizontal(-6, &layout),
-                MouseEventKind::ScrollRight => self.scroll_horizontal(6, &layout),
-                MouseEventKind::ScrollUp if mouse.modifiers.contains(KeyModifiers::SHIFT) => {
-                    self.scroll_horizontal(-6, &layout)
+                MouseEventKind::ScrollDown if !mouse.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.move_by(3)
                 }
-                MouseEventKind::ScrollDown if mouse.modifiers.contains(KeyModifiers::SHIFT) => {
-                    self.scroll_horizontal(6, &layout)
-                }
-                MouseEventKind::ScrollUp => self.move_by(-3),
-                MouseEventKind::ScrollDown => self.move_by(3),
                 _ => Effect::Idle,
             },
             _ => Effect::Idle,
@@ -513,21 +479,6 @@ impl Dashboard {
             .flatten()
             .collect();
         (candidates, focused.map(|row| row.selector.clone()))
-    }
-
-    fn scroll_horizontal(&mut self, amount: isize, layout: &Layout) -> Effect {
-        if !matches!(self.overlay, Overlay::None) {
-            return Effect::Idle;
-        }
-        let limit = layout.horizontal_max();
-        let start = self.horizontal.min(limit);
-        let next = start.saturating_add_signed(amount).min(limit);
-        if start == next {
-            return Effect::Idle;
-        }
-        self.horizontal = next;
-        self.clear_table_hits();
-        Effect::Redraw
     }
 
     fn move_by(&mut self, lines: isize) -> Effect {
@@ -576,15 +527,8 @@ impl Dashboard {
         }
     }
 
-    fn path_to_copy(&self) -> Option<&Row> {
-        self.hover
-            .as_deref()
-            .and_then(|selector| self.rows.iter().find(|row| row.selector == selector))
-            .or_else(|| self.focused())
-    }
-
     fn copy_path(&mut self, clipboard: &mut impl Clipboard) -> Effect {
-        self.notice = self.path_to_copy().and_then(Row::display_path).map_or_else(
+        self.notice = self.focused().and_then(Row::display_path).map_or_else(
             || {
                 tr(
                     self.vi,
@@ -717,10 +661,10 @@ impl Dashboard {
         if !super::text_modifiers(key) {
             return Effect::Idle;
         }
-        self.table_shortcut(key.code, layout)
+        self.table_shortcut(key.code)
     }
 
-    fn table_shortcut(&mut self, code: KeyCode, layout: &Layout) -> Effect {
+    fn table_shortcut(&mut self, code: KeyCode) -> Effect {
         match code {
             KeyCode::Char('q') => return Effect::Exit,
             KeyCode::Esc if self.searching => self.searching = false,
@@ -728,24 +672,8 @@ impl Dashboard {
             KeyCode::Char(':') => return Effect::CommandPrompt,
             KeyCode::Char('c') => return self.copy_path(&mut SystemClipboard),
             KeyCode::Char(' ') => self.toggle(self.cursor),
-            KeyCode::Left => return self.scroll_horizontal(-6, layout),
-            KeyCode::Right => return self.scroll_horizontal(6, layout),
-            KeyCode::Char('p') => {
-                self.hover = None;
-                self.path_focus = !self.path_focus;
-                self.notice.clear();
-                if self.path_focus && self.focused().is_none_or(|row| row.path.is_none()) {
-                    self.notice = tr(
-                        self.vi,
-                        "This repository has no local path.",
-                        "Kho mã này không có đường dẫn cục bộ.",
-                    )
-                    .into();
-                }
-            }
             KeyCode::Char('/') | KeyCode::Tab => {
                 self.notice.clear();
-                self.hover = None;
                 self.searching = true;
             }
             KeyCode::Char('g') => {

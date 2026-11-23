@@ -104,7 +104,7 @@ Use `--yes` to confirm bulk clone, add, or removal after checking the preview. L
 | `cnl repos branch <REPO> <BRANCH> [--switch]` · `cnl repos worktree <REPO> <PATH> --branch <BRANCH>` | Create or switch to a branch, or add a worktree for an existing branch. |
 | `cnl repos stage <REPO> <PATH>...` · `cnl repos commit <REPO> -m <MESSAGE>` · `cnl repos push <REPO>` | Stage named paths, commit staged changes, or push the tracked branch. Each command requires an explicit invocation. |
 
-The dashboard shows the branch, Git status, local path and short commit hash. Open Details to see ahead and behind counts, or History for the commit log. Use `/` to search, Space to select, and `G` to filter groups. Left and Right scroll the table horizontally. Hover over a path or press `P` to see it in full. Press `C` to copy it. Use `A` for actions, review the targets, and confirm changes with `Y`. Esc returns to the previous view.
+The dashboard shows the branch, Git status, local path and short commit hash. Open Details to see ahead and behind counts, or History for the commit log. Use `/` to search, Space to select, and `G` to filter groups. Open Details to see the full local path, or press `C` to copy it for the focused repository. Use `A` for actions, review the targets, and confirm changes with `Y`. Esc returns to the previous view.
 
 Press `:` to open the shared CNL command field. It uses the same history, completion and output controls as the main terminal. Press `T` to open the focused repository terminal.
 

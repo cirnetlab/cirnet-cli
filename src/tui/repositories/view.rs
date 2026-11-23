@@ -14,21 +14,13 @@ const CHECKBOX: usize = 6;
 
 #[derive(Default)]
 pub(super) struct TableHits {
-    size: Option<(u16, u16)>,
+    pub(super) size: Option<(u16, u16)>,
     pub(super) checkbox: Range<u16>,
-    pub(super) path: Range<u16>,
-    tooltip: Range<u16>,
     shortcut_row: Option<u16>,
     shortcuts: Vec<(Range<u16>, KeyCode)>,
 }
 
 impl TableHits {
-    pub(super) fn contains_row(&self, frame: &Frame, column: u16, row: u16) -> bool {
-        self.size == Some(frame.size)
-            && !self.tooltip.contains(&row)
-            && frame.menu_hit(column, row).is_some()
-    }
-
     pub(super) fn shortcut(&self, frame: &Frame, column: u16, row: u16) -> Option<KeyCode> {
         if self.size != Some(frame.size) || self.shortcut_row != Some(row) {
             return None;
@@ -72,10 +64,6 @@ impl Layout {
 
     fn table_width(&self) -> usize {
         self.width - self.details
-    }
-
-    pub(super) fn horizontal_max(&self) -> usize {
-        Columns::new(self.table_width(), 0).limit()
     }
 
     fn label(&self, frame: &mut Frame, row: u16, tone: Tone, value: &str) {
@@ -183,7 +171,7 @@ pub(super) fn state_label(state: &str, vi: bool) -> (&'static str, Tone) {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy)]
 enum Field {
     State,
     Branch,
@@ -195,69 +183,48 @@ enum Field {
 struct Columns {
     checkbox: usize,
     name: usize,
-    viewport: usize,
-    offset: usize,
     fields: [(Field, usize); 5],
 }
 
 impl Columns {
-    fn new(width: usize, offset: usize) -> Self {
+    fn new(width: usize) -> Self {
+        const STATE: usize = 15;
+        const BRANCH: usize = 9;
+        const MIN_PATH: usize = 18;
+        const REVISION: usize = 13;
+        const SOURCE: usize = 12;
+
         let checkbox = CHECKBOX.min(width / 2);
-        let space = width.saturating_sub(checkbox);
+        let space = width - checkbox;
         let name = (width / 4)
             .clamp(13, 29)
             .min(if space > 10 { space - 4 } else { space });
-        let viewport = space - name;
-        let mut fields = [
-            (Field::State, 19),
-            (Field::Branch, 12),
-            (Field::Path, 27),
-            (Field::Revision, 13),
-            (Field::Source, 12),
-        ];
-        let extra = viewport.saturating_sub(fields.iter().map(|(_, width)| width).sum());
-        let branch = (extra / 3).min(10);
-        fields[1].1 += branch;
-        fields[2].1 += extra - branch;
-        let mut columns = Self {
+        let available = space - name;
+        let state = available.min(STATE);
+        let branch = (available - state).min(BRANCH);
+        let remaining = available - state - branch;
+        let revision = if remaining >= MIN_PATH + REVISION {
+            REVISION
+        } else {
+            0
+        };
+        let source = if remaining >= MIN_PATH + REVISION + SOURCE {
+            SOURCE
+        } else {
+            0
+        };
+        let path = remaining - revision - source;
+        Self {
             checkbox,
             name,
-            viewport,
-            offset,
-            fields,
-        };
-        columns.offset = offset.min(columns.limit());
-        columns
-    }
-
-    fn limit(&self) -> usize {
-        if self.viewport == 0 {
-            return 0;
+            fields: [
+                (Field::State, state),
+                (Field::Branch, branch),
+                (Field::Path, path),
+                (Field::Revision, revision),
+                (Field::Source, source),
+            ],
         }
-        self.fields.iter().map(|(_, width)| width).sum::<usize>() - self.viewport
-    }
-
-    fn visible_fields(&self) -> impl Iterator<Item = (Field, usize, Range<usize>)> + '_ {
-        let mut start = 0;
-        self.fields.iter().filter_map(move |&(field, width)| {
-            let end = start + width;
-            let left = start.max(self.offset) - start;
-            let right = end.min(self.offset + self.viewport).saturating_sub(start);
-            start = end;
-            (left < right).then_some((field, width, left..right))
-        })
-    }
-
-    fn path_hit(&self, margin: usize) -> Range<u16> {
-        let mut start = margin + self.checkbox + self.name;
-        for (field, _, visible) in self.visible_fields() {
-            let end = start + visible.len();
-            if field == Field::Path {
-                return start as u16..end as u16;
-            }
-            start = end;
-        }
-        0..0
     }
 
     fn header(&self, layout: &Layout, vi: bool) -> Line {
@@ -269,7 +236,7 @@ impl Columns {
             Tone::Heading,
             tr(vi, "Repository", "Kho mã"),
         );
-        for (field, width, visible) in self.visible_fields() {
+        for (field, width) in self.fields {
             let label = match field {
                 Field::State => tr(vi, "Git status", "Trạng thái Git"),
                 Field::Branch => tr(vi, "Branch", "Nhánh"),
@@ -277,7 +244,7 @@ impl Columns {
                 Field::Revision => tr(vi, "Last commit", "Commit cuối"),
                 Field::Source => tr(vi, "Source", "Nguồn"),
             };
-            cell_part(&mut line, width, visible, Tone::Heading, label);
+            cell(&mut line, width, Tone::Heading, label);
         }
         line
     }
@@ -309,7 +276,10 @@ impl Columns {
         } else {
             row.branch.as_deref().unwrap_or("—")
         };
-        for (field, width, visible) in self.visible_fields() {
+        for (field, width) in self.fields {
+            if width == 0 {
+                continue;
+            }
             let full_path;
             let (style, value) = match field {
                 Field::State => (tone, status),
@@ -322,29 +292,10 @@ impl Columns {
                 Field::Revision => (Tone::Muted, row.short_revision.as_deref().unwrap_or("—")),
                 Field::Source => (Tone::Muted, source(row, vi, true)),
             };
-            cell_part(&mut line, width, visible, style, value);
+            cell(&mut line, width, style, value);
         }
         line
     }
-}
-
-fn cell_part(line: &mut Line, width: usize, visible: Range<usize>, tone: Tone, value: &str) {
-    let text = clip(value, width - 1);
-    let mut at = 0;
-    let mut written = visible.start;
-    for grapheme in text.graphemes(true) {
-        let end = at + grapheme.width();
-        if end > visible.end {
-            break;
-        }
-        if at >= visible.start {
-            line.push(Tone::Plain, " ".repeat(at - written));
-            line.push(tone, grapheme);
-            written = end;
-        }
-        at = end;
-    }
-    line.push(Tone::Plain, " ".repeat(visible.end - written));
 }
 
 fn divergence(row: &Row) -> String {
@@ -563,9 +514,6 @@ impl Dashboard {
         let mut frame = Frame::new(size);
         let layout = Layout::new(size);
         self.rendered_overlay = Some(std::mem::discriminant(&self.overlay));
-        if self.table_hits.size != Some(size) {
-            self.hover = None;
-        }
         if layout.width == 0 || size.1 == 0 {
             return frame;
         }
@@ -750,11 +698,10 @@ impl Dashboard {
     fn table_frame(&mut self, frame: &mut Frame, layout: &Layout) {
         self.reveal(layout.table.len());
         let vi = self.vi;
-        let columns = Columns::new(layout.table_width(), self.horizontal);
+        let columns = Columns::new(layout.table_width());
         let mut hits = TableHits {
             size: Some(frame.size),
             checkbox: layout.margin as u16..(layout.margin + columns.checkbox.min(3)) as u16,
-            path: columns.path_hit(layout.margin),
             ..TableHits::default()
         };
         if frame.size.1 >= 2 {
@@ -835,34 +782,11 @@ impl Dashboard {
                 &format!("{} · {group}", tr(vi, "Group", "Nhóm")),
             );
         }
-        self.table_footer(frame, layout, &columns, &mut hits);
-        if let Some(row) = self
-            .path_to_copy()
-            .filter(|_| self.hover.is_some() || self.path_focus)
-            && let Some(path) = row.display_path()
-        {
-            let anchor = layout
-                .table
-                .clone()
-                .take(visible)
-                .enumerate()
-                .find(|(index, _)| {
-                    self.row(self.scroll + index)
-                        .is_some_and(|candidate| candidate.selector == row.selector)
-                })
-                .map_or(layout.table.start, |(_, y)| y);
-            hits.tooltip = tooltip(frame, layout, anchor, &path, self.vi);
-        }
+        self.table_footer(frame, layout, &mut hits);
         self.table_hits = hits;
     }
 
-    fn table_footer(
-        &self,
-        frame: &mut Frame,
-        layout: &Layout,
-        columns: &Columns,
-        hits: &mut TableHits,
-    ) {
+    fn table_footer(&self, frame: &mut Frame, layout: &Layout, hits: &mut TableHits) {
         let Some(y) = layout.shortcuts else { return };
         let vi = self.vi;
         let full = format!(
@@ -897,10 +821,7 @@ impl Dashboard {
             (KeyCode::Char('/'), tr(vi, "/ Search", "/ Tìm"), "/"),
             (KeyCode::Char('g'), tr(vi, "G Groups", "G Nhóm"), "G"),
             (KeyCode::Char('t'), "T Terminal", "T"),
-            (KeyCode::Char('p'), tr(vi, "P Path", "P Đường dẫn"), "P"),
             (KeyCode::Char('c'), tr(vi, "C Copy", "C Sao chép"), "C"),
-            (KeyCode::Left, "←", "←"),
-            (KeyCode::Right, "→", "→"),
             (KeyCode::F(5), tr(vi, "F5 Refresh", "F5 Làm mới"), "F5"),
             (KeyCode::Enter, enter, "Enter"),
             (KeyCode::Esc, tr(vi, "Esc Back", "Esc Quay lại"), "Esc"),
@@ -909,9 +830,7 @@ impl Dashboard {
         let mut used = 0;
         hits.shortcut_row = Some(y);
         for (code, full, short) in shortcuts {
-            if (code == KeyCode::Char('t') && self.update_only)
-                || (matches!(code, KeyCode::Left | KeyCode::Right) && columns.limit() == 0)
-            {
+            if code == KeyCode::Char('t') && self.update_only {
                 continue;
             }
             let separator = if used == 0 { "" } else { "  " };
@@ -939,36 +858,6 @@ impl Dashboard {
         line.push(Tone::Muted, count);
         frame.rows[usize::from(y)] = line;
     }
-}
-
-fn tooltip(frame: &mut Frame, layout: &Layout, anchor: u16, path: &str, vi: bool) -> Range<u16> {
-    let prefix = tr(vi, "Path · ", "Đường dẫn · ");
-    let mut lines = wrap(&format!("{prefix}{path}"), layout.width);
-    let first = layout.table.start;
-    let end = layout.shortcuts.unwrap_or(frame.size.1);
-    let below = end.saturating_sub(anchor.saturating_add(1));
-    let above = anchor.saturating_sub(first);
-    let (start, usable) = if lines.len() <= usize::from(below) || below >= above {
-        (anchor.saturating_add(1), below)
-    } else {
-        (
-            anchor.saturating_sub(lines.len().min(usize::from(above)) as u16),
-            above,
-        )
-    };
-    if usable == 0 {
-        return 0..0;
-    }
-    if lines.len() > usize::from(usable) {
-        lines.truncate(usize::from(usable));
-        let last = lines.last_mut().expect("tooltip line");
-        *last = format!("{}…", clip(last, layout.width - 1));
-    }
-    let end = start + lines.len() as u16;
-    for (y, text) in (start..end).zip(lines) {
-        layout.label(frame, y, Tone::Path, &text);
-    }
-    start..end
 }
 
 fn choices<'a>(
