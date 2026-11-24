@@ -2,7 +2,6 @@
 
 ![GitHub repo size](https://img.shields.io/github/repo-size/cirnetlab/cirnet-cli)
 [![GitHub License](https://img.shields.io/github/license/cirnetlab/cirnet-cli)](LICENSE)
-![GitHub Issues](https://img.shields.io/github/issues/cirnetlab/cirnet-cli)
 
 **CIRNETLAB CLI (`cnl`)** is a Rust tool for managing Git repositories, preparing the environment, building and running the CIRNETLAB system on Windows x64.
 
