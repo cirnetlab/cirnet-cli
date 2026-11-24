@@ -158,18 +158,18 @@ fn toolbar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State)
             Command::Menu.title(vi),
         ]
     };
-    let reserved = labels.iter().map(|label| label.width() + 3).sum::<usize>() as u16;
-    let end = width.saturating_sub(reserved);
-    let title = if width >= 76 {
-        " CIRNET LAB / Terminal"
-    } else {
-        " Terminal"
-    };
-    let caption = manager.active().map_or_else(
-        || title.to_owned(),
-        |active| format!("{title} · {}", active.repository),
-    );
-    write_span(row, Tone::Accent, &ellipsize(&caption, end as usize), end);
+    // let reserved = labels.iter().map(|label| label.width() + 3).sum::<usize>() as u16;
+    // let end = width.saturating_sub(reserved);
+    // let title = if width >= 76 {
+    //     "Terminal"
+    // } else {
+    //     " Terminal"
+    // };
+    // let caption = manager.active().map_or_else(
+    //     || title.to_owned(),
+    //     |active| format!("{title} · {}", active.repository),
+    // );
+    // write_span(row, Tone::Accent, &ellipsize(&caption, end as usize), end);
     for (command, label) in controls.into_iter().zip(labels) {
         let text = format!(" {label} ");
         let start = row_width(row);
@@ -333,15 +333,7 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
         locale(["SESSIONS", "PHIÊN"], vi),
         manager.entries.len()
     );
-    for y in area.y..area.bottom() {
-        sidebar_line(
-            frame,
-            area,
-            y,
-            SURFACE,
-            if y == area.y { &title } else { "" },
-        );
-    }
+    sidebar_line(frame, area, area.y, SURFACE, &title);
     if area.width >= 16 {
         let x = area.right() - 3;
         let mut search = Line::default();
@@ -374,12 +366,8 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
         }
         list_y += 1;
     }
-    let detail_height = if area.height >= 7 && selected.is_some() {
-        2
-    } else {
-        0
-    };
-    let capacity = (area.bottom().saturating_sub(list_y + detail_height)) as usize;
+    let list_end = area.bottom();
+    let capacity = usize::from(list_end.saturating_sub(list_y));
     let index = selected
         .and_then(|id| ids.iter().position(|entry| *entry == id))
         .unwrap_or_default();
@@ -391,20 +379,17 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
             .min(active)
             .max(active.saturating_add(1).saturating_sub(capacity));
     }
-    if ids.is_empty() && capacity > 0 {
-        sidebar_line(
-            frame,
-            area,
-            list_y,
-            SURFACE,
-            locale([" No matching sessions", " Không có phiên phù hợp"], vi),
-        );
-    }
-    for (offset, id) in ids.into_iter().skip(start).take(capacity).enumerate() {
-        let Some(session) = manager.session(id) else {
+    for (offset, y) in (list_y..list_end).enumerate() {
+        let Some(session) = ids.get(start + offset).and_then(|id| manager.session(*id)) else {
+            let text = if offset == 0 && ids.is_empty() {
+                locale([" No matching sessions", " Không có phiên phù hợp"], vi)
+            } else {
+                ""
+            };
+            sidebar_line(frame, area, y, SURFACE, text);
             continue;
         };
-        let y = list_y + offset as u16;
+        let id = session.id;
         let focused = Some(id) == selected && manager.arrangement.sidebar_focused;
         let running = session.running();
         let marker = if Some(id) == active {
@@ -433,36 +418,6 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
         );
         sidebar_line(frame, area, y, tone, &line);
         hits.row(area.x, y, area.width, Hit::Session(id));
-    }
-    if detail_height > 0
-        && let Some(session) = state
-            .sidebar_hover
-            .or(selected)
-            .and_then(|id| manager.session(id))
-    {
-        let at = area.bottom() - 2;
-        sidebar_line(
-            frame,
-            area,
-            at,
-            SURFACE,
-            &format!(
-                " {}",
-                ellipsize(session.title(), area.width.saturating_sub(1) as usize)
-            ),
-        );
-        let status = if session.running() {
-            locale(["Running", "Đang chạy"], vi)
-        } else {
-            locale(["Exited", "Đã thoát"], vi)
-        };
-        sidebar_line(
-            frame,
-            area,
-            at + 1,
-            SURFACE,
-            &format!(" #{} · {} · {status}", session.id, session.shell),
-        );
     }
 }
 

@@ -24,6 +24,8 @@
 - Remove the F10 Back button from the terminal toolbar and trim the footer shortcuts.
 - Show standard Windows paths in repository reports and open PowerShell in the equivalent Windows directory.
 - Refine the terminal toolbar and session navigator. Add adjustable splits, pane maximization, scrollback search, and visible text selection.
+- Render Terminal sidebar session names, shell status, and filter results on the sidebar background.
+- Remove the two-line session details footer from the Terminal sidebar.
 
 ### Tiếng Việt
 
@@ -47,3 +49,5 @@
 - Bỏ nút F10 Back khỏi thanh công cụ Terminal và rút gọn gợi ý phím tắt ở thanh dưới.
 - Hiển thị đường dẫn Windows thông thường trong báo cáo kho mã và mở PowerShell tại thư mục Windows tương đương.
 - Tinh chỉnh thanh công cụ và danh sách phiên. Bổ sung chỉnh tỷ lệ chia, phóng to pane, tìm trong đầu ra đã lưu và chọn văn bản đang hiển thị.
+- Hiển thị tên phiên, trạng thái shell và kết quả lọc trên nền bảng Phiên của Terminal.
+- Bỏ hai dòng chi tiết phiên ở đáy sidebar Terminal.

@@ -518,7 +518,27 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
         hits.at(sidebar.x, sidebar.y + 2),
         Some(render::Hit::Session(split))
     );
-    assert!(frame.rows[0].contents().contains("fixture-two"));
+    // Hit regions can exist even when the sidebar rows are blank.
+    for row_index in [sidebar.y + 1, sidebar.y + 2] {
+        let row = frame.rows[usize::from(row_index)].contents();
+        assert!(
+            row.ends_with(" CMD ● "),
+            "sidebar session row is missing: {row:?}"
+        );
+    }
+    let blank_sidebar = " ".repeat(usize::from(sidebar.width));
+    for row_index in [sidebar.bottom() - 2, sidebar.bottom() - 1] {
+        let row = frame.rows[usize::from(row_index)].contents();
+        assert!(
+            row.ends_with(&blank_sidebar),
+            "unexpected sidebar details: {row:?}"
+        );
+    }
+    assert!(
+        frame.rows[usize::from(first.body.y - 1)]
+            .contents()
+            .contains("fixture-two")
+    );
 
     let split_process = witness(manager.session(split).unwrap());
     let divider = layout.vertical_divider.unwrap();
@@ -609,6 +629,21 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
     key(&mut state, &mut manager, KeyCode::Char('/'));
     key(&mut state, &mut manager, KeyCode::Char('z'));
     assert!(state.sidebar_ids(&manager).is_empty());
+    let filter_layout = Layout::new(state.size, &manager.arrangement);
+    let (filter_frame, _) = render::frame(&manager, &filter_layout, &state);
+    let filter_y = filter_layout.sidebar.unwrap().y;
+    assert!(
+        filter_frame.rows[usize::from(filter_y + 1)]
+            .contents()
+            .trim_end()
+            .ends_with("/ z")
+    );
+    assert!(
+        filter_frame.rows[usize::from(filter_y + 2)]
+            .contents()
+            .trim_end()
+            .ends_with("No matching sessions")
+    );
     key(&mut state, &mut manager, KeyCode::Esc);
     assert_eq!(state.sidebar_ids(&manager), [original, split]);
     key(&mut state, &mut manager, KeyCode::Down);
