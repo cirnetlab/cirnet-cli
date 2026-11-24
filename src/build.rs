@@ -579,9 +579,9 @@ fn rtl(root: &Path, candidate: &Candidate, args: &ArgMatches, output: &Path) -> 
     let receipt = candidate
         .session()
         .join("contracts/contracts-native-manifest.json");
-    let allocator = candidate.session().join(
-        "src/cirnet-contracts/tools/artifact-paths/cirnet_artifact_paths/artifact-paths.mjs",
-    );
+    let allocator = candidate
+        .session()
+        .join("src/cirnet-contracts/tools/artifact-paths/cirnet_artifact_paths/artifact-paths.mjs");
     let mut command = Command::new(python());
     run(command
         .current_dir(root)
