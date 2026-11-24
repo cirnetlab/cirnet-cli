@@ -169,7 +169,8 @@ fn terminal_shows_back_in_footer_and_omits_scroll_hints() {
         let toolbar = frame.rows[0].contents();
         let footer = frame.rows.last().unwrap().contents();
 
-        assert_eq!(toolbar.chars().filter(|&cell| cell == '◫').count(), 1);
+        assert!(!toolbar.contains('◫'), "{toolbar:?}");
+        assert!(toolbar.contains(" Split "), "{toolbar:?}");
         assert_eq!(toolbar.contains("Actions"), width >= 45);
         assert!(!toolbar.contains("F5"));
         assert!(!toolbar.contains("F10"));
@@ -581,6 +582,9 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
 
     let (frame, hits) = render::frame(&manager, &layout, &state);
     let sidebar = layout.sidebar.unwrap();
+    let toolbar = frame.rows[0].contents();
+    assert!(toolbar.contains(" Unsplit "), "{toolbar:?}");
+    assert!(!toolbar.contains('◫'), "{toolbar:?}");
     let heading = frame.rows[usize::from(sidebar.y)].contents();
     assert!(heading.contains("SESSIONS"));
     assert!(!heading.contains(&rows[1].selector));

@@ -55,7 +55,7 @@ const SURFACE: Tone = Tone::Palette(PalettePart::ContextItem);
 const SELECTED: Tone = Tone::Palette(PalettePart::ContextSelected);
 const BORDER: Tone = Tone::Palette(PalettePart::ContextEdge);
 const TERMINAL_ICON: &str = "›_";
-const SPLIT_ICON: &str = "◫";
+const SIDEBAR_SPLIT_ICON: &str = "◫";
 
 pub(super) fn frame(manager: &Manager, layout: &Layout, state: &State) -> (Frame, Hits) {
     let mut frame = Frame::new(state.size);
@@ -148,9 +148,8 @@ fn toolbar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State)
         Command::Sidebar,
         Command::Menu,
     ];
-    let compact = width < 45;
-    let labels = if compact {
-        ["+", SPLIT_ICON, "≡", "⋯"]
+    let labels = if width < 45 {
+        ["+", action_title(Command::Split, manager, vi), "≡", "⋯"]
     } else if width >= 76 {
         controls.map(|cmd| action_title(cmd, manager, vi))
     } else {
@@ -174,11 +173,7 @@ fn toolbar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State)
     // );
     // write_span(row, Tone::Accent, &ellipsize(&caption, end as usize), end);
     for (command, label) in controls.into_iter().zip(labels) {
-        let text = if command == Command::Split && !compact {
-            format!(" {SPLIT_ICON} {label} ")
-        } else {
-            format!(" {label} ")
-        };
+        let text = format!(" {label} ");
         let start = row_width(row);
         let button_width = text.width() as u16;
         if start + 1 + button_width > width {
@@ -443,9 +438,10 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
         sidebar_line(frame, area, y, tone, &line);
         hits.row(area.x, y, area.width, Hit::Session(id));
         if actions {
-            for (offset, command, icon) in
-                [(6, Command::Split, SPLIT_ICON), (3, Command::Close, "×")]
-            {
+            for (offset, command, icon) in [
+                (6, Command::Split, SIDEBAR_SPLIT_ICON),
+                (3, Command::Close, "×"),
+            ] {
                 let x = area.right() - offset;
                 let enabled = state.sidebar_action_enabled(manager, id, command);
                 let mut button = Line::default();
