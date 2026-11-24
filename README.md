@@ -50,7 +50,7 @@ cargo build --release
 cargo run --release
 ```
 
-## 2. Chuẩn bị mã nguồn
+## 3. Chuẩn bị mã nguồn
 
 Đặt **7 repository cùng cấp** trong một thư mục workspace.
 
@@ -72,7 +72,7 @@ Set-Location .\cirnet-cli
 
 Cần có quyền GitHub đối với repository riêng tư. Nếu đã có đủ 7 thư mục local, bỏ qua bước clone và mở trực tiếp thư mục `cirnet-cli`.
 
-## 3. Build và mở Browser Interface
+## 4. Build và mở Browser Interface
 
 Từ thư mục `cirnet-cli`:
 
@@ -99,7 +99,7 @@ cnl run --desktop interface --initialize-db
 
 Giao diện Vue/TypeScript thuộc `cirnet-interface-next`; backend Rust REST/WebSocket thuộc `cirnet-remote-next`. Dùng `cnl stop` trước khi đổi chế độ trong cùng profile.
 
-## 4. Lệnh thường dùng
+## 5. Lệnh thường dùng
 
 | Lệnh | Chức năng |
 | --- | --- |
