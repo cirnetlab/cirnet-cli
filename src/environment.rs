@@ -263,7 +263,7 @@ pub fn install_browser(receipt: &Path, cache: &Path) -> Result<()> {
     let interface = receipt
         .parent()
         .context(message(localization::BUILD_RECEIPT_REQUIRED))?
-        .join("src/cirnet-interface-next");
+        .join("src/cirnet-interface");
     let cli = interface.join("node_modules/@playwright/test/cli.js");
     if !cli.is_file() {
         bail!("{}", message(localization::PLAYWRIGHT_MISSING));

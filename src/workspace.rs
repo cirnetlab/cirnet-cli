@@ -50,11 +50,11 @@ impl Repo {
     pub fn name(self) -> &'static str {
         match self {
             Self::Cli => "cirnet-cli",
-            Self::Contracts => "cirnet-contracts-next",
-            Self::Simulator => "cirnet-simulator-next",
-            Self::Hardware => "cirnet-hardware-next",
-            Self::Remote => "cirnet-remote-next",
-            Self::Interface => "cirnet-interface-next",
+            Self::Contracts => "cirnet-contracts",
+            Self::Simulator => "cirnet-simulator",
+            Self::Hardware => "cirnet-hardware",
+            Self::Remote => "cirnet-remote",
+            Self::Interface => "cirnet-interface",
             Self::Embedded => "cirnet-embedded-hardware",
         }
     }

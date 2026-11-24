@@ -59,9 +59,9 @@ New-Item -ItemType Directory -Force $workspace | Out-Null
 Set-Location $workspace
 
 $repos = @(
-  "cirnet-cli", "cirnet-contracts-next", "cirnet-simulator-next",
-  "cirnet-hardware-next", "cirnet-remote-next",
-  "cirnet-interface-next", "cirnet-embedded-hardware"
+  "cirnet-cli", "cirnet-contracts", "cirnet-simulator",
+  "cirnet-hardware", "cirnet-remote",
+  "cirnet-interface", "cirnet-embedded-hardware"
 )
 foreach ($repo in $repos) {
   git clone "https://github.com/cirnetlab/$repo.git"
@@ -96,7 +96,7 @@ cnl run --desktop interface --initialize-db
 | Development (Vite, hot reload) | `cnl run --desktop interface` | http://127.0.0.1:5173 |
 | Packaged (Rust Remote serves the built web interface) | `cnl run --desktop interface --mode packaged` | http://127.0.0.1:8000 |
 
-The Vue/TypeScript interface belongs to `cirnet-interface-next`; the Rust REST/WebSocket backend belongs to `cirnet-remote-next`. Use `cnl stop` before switching modes within the same profile.
+The Vue/TypeScript interface belongs to `cirnet-interface`; the Rust REST/WebSocket backend belongs to `cirnet-remote`. Use `cnl stop` before switching modes within the same profile.
 
 ## 5. Common Commands
 

@@ -2,7 +2,7 @@
 
 [Tiếng Việt](../vi/index.md) · [CNL and Cargo command reference](commands.md)
 
-`cnl` builds and operates the Windows x64 development stack. Remote owns the exact system selection, manifests, and the Hardware and Simulator shutdown sequence. The CLI uses the existing Interface and exposes the [CIRNETLAB target architecture](https://github.com/cirnetlab/cirnet-remote-next/blob/233bd694f0c1005ad9aa7c9882d636f68a3e170d/docs/cirnetlab-architecture-en.md).
+`cnl` builds and operates the Windows x64 development stack. Remote owns the exact system selection, manifests, and the Hardware and Simulator shutdown sequence. The CLI uses the existing Interface and exposes the [CIRNETLAB target architecture](https://github.com/cirnetlab/cirnet-remote/blob/master/docs/cirnetlab-architecture-en.md).
 
 ## Build and run
 
@@ -23,7 +23,7 @@ if ($LASTEXITCODE -ne 0 -or !$cnl) { throw 'The cnl build did not complete.' }
 & $cnl stop
 ```
 
-Cargo builds the CLI. `cnl build --all` builds the native candidate and selects its receipt for the current profile. Reuse a verified candidate with `--receipt <absolute-path-to-assembly-result.json>`. The initial `--initialize-db` authorizes migration of a fresh SQLite database. Existing state passes the native launcher's schema check. The development profile uses virtual Hardware and Simulator. For a separately configured PostgreSQL service, see [Remote's deployment guides](https://github.com/cirnetlab/cirnet-remote-next/tree/master/docs/en/operations).
+Cargo builds the CLI. `cnl build --all` builds the native candidate and selects its receipt for the current profile. Reuse a verified candidate with `--receipt <absolute-path-to-assembly-result.json>`. The initial `--initialize-db` authorizes migration of a fresh SQLite database. Existing state passes the native launcher's schema check. The development profile uses virtual Hardware and Simulator. For a separately configured PostgreSQL service, see [Remote's deployment guides](https://github.com/cirnetlab/cirnet-remote/tree/master/docs/en/operations).
 
 The CLI searches the working directory and then the executable's ancestors. For an executable installed outside the workspace, pass `--workspace <directory>` or set `CNL_WORKSPACE`. Artifacts and SQLite state default to a per-workspace directory under `%LOCALAPPDATA%\CIRNETLAB`. Use `--state-dir <absolute-external-directory>` and `--profile <name>` for isolated state. Use a short external path if MSVC cannot open a deeply nested build output. Use `cnl env set --port 8000 --hardware-port 50051 --dev-port 5173` to change the profile ports.
 

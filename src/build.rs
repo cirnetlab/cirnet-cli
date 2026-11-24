@@ -434,7 +434,7 @@ pub fn verify(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result
         let candidate = candidate(workspace, state, args.get_one("receipt"))?;
         let runner = candidate
             .session()
-            .join("src/cirnet-remote-next/scripts/test-native-windows.mjs");
+            .join("src/cirnet-remote/scripts/test-native-windows.mjs");
         if !runner.is_file() {
             bail!("{}", message(localization::VERIFY_RUNNER_MISSING));
         }
@@ -484,7 +484,7 @@ pub fn verify(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result
             )?,
             Repo::Interface => {
                 let build = candidate(workspace, state, args.get_one("receipt"))?;
-                let web = build.session().join("src/cirnet-interface-next");
+                let web = build.session().join("src/cirnet-interface");
                 let ownership: Value = serde_json::from_slice(&fs::read(
                     build.session().join(".cirnet-artifact-session.json"),
                 )?)?;
@@ -580,7 +580,7 @@ fn rtl(root: &Path, candidate: &Candidate, args: &ArgMatches, output: &Path) -> 
         .session()
         .join("contracts/contracts-native-manifest.json");
     let allocator = candidate.session().join(
-        "src/cirnet-contracts-next/tools/artifact-paths/cirnet_artifact_paths/artifact-paths.mjs",
+        "src/cirnet-contracts/tools/artifact-paths/cirnet_artifact_paths/artifact-paths.mjs",
     );
     let mut command = Command::new(python());
     run(command

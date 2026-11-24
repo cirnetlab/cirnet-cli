@@ -46,7 +46,7 @@ try {
     const data = await metadata.json();
     const entry = /src="(\/assets\/[^"]+\.js)"/.exec(body)?.[1];
     const asset = entry ? await get(entry) : null;
-    probe.interface = page.ok && metadata.ok && data.name === 'cirnet-interface-next' && data.kind === 'static' &&
+    probe.interface = page.ok && metadata.ok && data.name === 'cirnet-interface' && data.kind === 'static' &&
       data.sourceFingerprint === expected && asset?.ok && /javascript/.test(asset.headers.get('content-type'));
     await asset?.body?.cancel();
   }

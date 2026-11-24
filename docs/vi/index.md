@@ -2,7 +2,7 @@
 
 [English](../en/index.md) · [Tham chiếu lệnh CNL và Cargo](commands.md)
 
-`cnl` build và vận hành hệ thống phát triển Windows x64. Remote quản lý bộ đầu vào chính xác, manifest và trình tự dừng Hardware và Simulator. CLI dùng Interface hiện có và tuân theo [kiến trúc mục tiêu CIRNETLAB](https://github.com/cirnetlab/cirnet-remote-next/blob/233bd694f0c1005ad9aa7c9882d636f68a3e170d/docs/cirnetlab-architecture-vi.md).
+`cnl` build và vận hành hệ thống phát triển Windows x64. Remote quản lý bộ đầu vào chính xác, manifest và trình tự dừng Hardware và Simulator. CLI dùng Interface hiện có và tuân theo [kiến trúc mục tiêu CIRNETLAB](https://github.com/cirnetlab/cirnet-remote/blob/master/docs/cirnetlab-architecture-vi.md).
 
 ## Build và chạy
 
@@ -23,7 +23,7 @@ if ($LASTEXITCODE -ne 0 -or !$cnl) { throw 'Bản dựng cnl chưa hoàn tất.'
 & $cnl stop
 ```
 
-Cargo build CLI. `cnl build --all` build ứng viên native và chọn receipt của ứng viên cho hồ sơ hiện tại. Dùng `--receipt <đường-dẫn-tuyệt-đối-đến-assembly-result.json>` để dùng lại ứng viên đã kiểm chứng. Cờ `--initialize-db` cho phép chạy migration để tạo cơ sở dữ liệu SQLite mới. Launcher native kiểm tra schema của dữ liệu hiện có. Hồ sơ phát triển dùng Hardware và Simulator ảo. Để cấu hình PostgreSQL riêng, xem [hướng dẫn triển khai Remote](https://github.com/cirnetlab/cirnet-remote-next/tree/master/docs/vi/operations).
+Cargo build CLI. `cnl build --all` build ứng viên native và chọn receipt của ứng viên cho hồ sơ hiện tại. Dùng `--receipt <đường-dẫn-tuyệt-đối-đến-assembly-result.json>` để dùng lại ứng viên đã kiểm chứng. Cờ `--initialize-db` cho phép chạy migration để tạo cơ sở dữ liệu SQLite mới. Launcher native kiểm tra schema của dữ liệu hiện có. Hồ sơ phát triển dùng Hardware và Simulator ảo. Để cấu hình PostgreSQL riêng, xem [hướng dẫn triển khai Remote](https://github.com/cirnetlab/cirnet-remote/tree/master/docs/vi/operations).
 
 CLI tìm workspace từ thư mục hiện hành, sau đó từ các thư mục cha của executable. Khi executable được cài bên ngoài workspace, dùng `--workspace <thư-mục>` hoặc đặt `CNL_WORKSPACE`. Artifact và SQLite mặc định nằm trong thư mục riêng theo workspace dưới `%LOCALAPPDATA%\CIRNETLAB`. Dùng `--state-dir <thư-mục-tuyệt-đối-nằm-ngoài-repo>` và `--profile <tên>` để chọn trạng thái cách ly. Chọn đường dẫn ngoài repo ngắn hơn nếu MSVC không mở được tệp build nằm quá sâu. Dùng `cnl env set --port 8000 --hardware-port 50051 --dev-port 5173` để đổi cổng của hồ sơ.
 
