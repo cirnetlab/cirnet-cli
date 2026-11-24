@@ -148,7 +148,7 @@ fn toolbar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State)
     ];
     let compact = width < 45;
     let labels = if compact {
-        ["+", "◫", "≡", "⋯"]
+        ["+", "▯▯", "≡", "⋯"]
     } else if width >= 76 {
         controls.map(|cmd| action_title(cmd, manager, vi))
     } else {
@@ -415,7 +415,7 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
         } else {
             &session.shell
         };
-        let left = format!("{marker}▣ {shell} {}", session.title());
+        let left = format!("{marker}>_ {shell} {}", session.title());
         let room = usize::from(area.width).saturating_sub(right.width());
         let left = ellipsize(&left, room);
         let line = format!(
@@ -425,7 +425,7 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
         sidebar_line(frame, area, y, tone, &line);
         hits.row(area.x, y, area.width, Hit::Session(id));
         if actions {
-            for (offset, command, icon) in [(6, Command::Split, " ◫ "), (3, Command::Close, " × ")]
+            for (offset, command, icon) in [(6, Command::Split, "▯▯ "), (3, Command::Close, " × ")]
             {
                 let x = area.right() - offset;
                 let enabled = state.sidebar_action_enabled(manager, command);

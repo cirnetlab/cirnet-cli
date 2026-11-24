@@ -27,6 +27,7 @@
 - Render Terminal sidebar session names, shell status, and filter results on the sidebar background.
 - Remove the two-line session details footer from the Terminal sidebar.
 - Show a terminal icon, shell, and repository on each sidebar row, with split and close actions on hover.
+- Use a shell prompt and two pane outlines for the terminal icons.
 
 ### Tiếng Việt
 
@@ -53,3 +54,4 @@
 - Hiển thị tên phiên, trạng thái shell và kết quả lọc trên nền bảng Phiên của Terminal.
 - Bỏ hai dòng chi tiết phiên ở đáy sidebar Terminal.
 - Hiển thị biểu tượng terminal, shell và repo trên mỗi dòng sidebar, kèm nút chia và đóng khi rê chuột.
+- Dùng biểu tượng dấu nhắc cho shell và hai khung cho thao tác chia pane.
