@@ -39,9 +39,20 @@
 
 `cnl` **không tự cài** toolchain hệ thống. Cargo và npm tự tải dependencies cần thiết trong quá trình build. **Không cần Python `venv` để chạy Browser Interface**; Python chỉ phục vụ một số kiểm thử chuyên biệt.
 
+## 2. Mở Command Line Interface CNL
+
+- Tại đường dẫn `cirnet-cli` hãy nhập lệnh:
+
+```powershell
+# Lệnh build CNL
+cargo build --release
+# Lệnh chạy CNL
+cargo run --release
+```
+
 ## 2. Chuẩn bị mã nguồn
 
-Đặt **7 repository cùng cấp** trong một thư mục workspace. Ví dụ mở PowerShell 7 và chạy:
+Đặt **7 repository cùng cấp** trong một thư mục workspace.
 
 ```powershell
 $workspace = "C:\CIRNETLAB"
@@ -66,10 +77,13 @@ Cần có quyền GitHub đối với repository riêng tư. Nếu đã có đ�
 Từ thư mục `cirnet-cli`:
 
 ```powershell
-cargo install --locked --path .
+# Kiểm tra toolchain
 cnl doctor
+# Xác nhận môi trường
 cnl setup
+# Build chương trình
 cnl build --all
+# Mở Browser Interface
 cnl run --desktop interface --initialize-db
 ```
 
