@@ -4,7 +4,7 @@
 [![GitHub License](https://img.shields.io/github/license/cirnetlab/cirnet-cli)](LICENSE)
 ![GitHub Issues](https://img.shields.io/github/issues/cirnetlab/cirnet-cli)
 
-**CIRNETLAB CLI (`cnl`)** là công cụ Rust để quản lý Git repository, chuẩn bị môi trường, build và chạy hệ thống CIRNETLAB trên Windows x64.
+**CIRNETLAB CLI (`cnl`)** is a Rust tool for managing Git repositories, preparing the environment, building and running the CIRNETLAB system on Windows x64.
 
 <p align="center">
   <img src="assets/menu_interface.png" alt="CIRNETLAB CLI" width="750" />
@@ -26,33 +26,33 @@
 </p>
 </details>
 
-## 1. Cài đặt công cụ
+## 1. Install Tools
 
-| Công cụ | Yêu cầu |
+| Tool | Requirements |
 | --- | --- |
-| [Git](https://git-scm.com/downloads/win) | Clone và quản lý source |
-| [Rust & Cargo](https://rustup.rs/) | **1.99.1**, theo `rust-toolchain.toml` |
+| [Git](https://git-scm.com/downloads/win) | Clone and manage source code |
+| [Rust & Cargo](https://rustup.rs/) | **1.99.1**, as specified in `rust-toolchain.toml` |
 | [PowerShell](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows) | **7.4+** (`pwsh`) |
-| [Visual Studio 2022](https://visualstudio.microsoft.com/vs/older-downloads/) | **Desktop development with C++**, MSVC x64 và Windows SDK |
+| [Visual Studio 2022](https://visualstudio.microsoft.com/vs/older-downloads/) | **Desktop development with C++**, MSVC x64 and Windows SDK |
 | [CMake](https://cmake.org/download/) | Build C++ Simulator |
-| [Node.js](https://nodejs.org/en/download) | **26.x**, gồm npm |
+| [Node.js](https://nodejs.org/en/download) | **26.x**, including npm |
 
-`cnl` **không tự cài** toolchain hệ thống. Cargo và npm tự tải dependencies cần thiết trong quá trình build. **Không cần Python `venv` để chạy Browser Interface**; Python chỉ phục vụ một số kiểm thử chuyên biệt.
+`cnl` **does not automatically install** the system toolchain. Cargo and npm automatically download the required dependencies during the build process. **Python `venv` is not required to run the Browser Interface**; Python is only used for certain specialized tests.
 
-## 2. Mở Command Line Interface CNL
+## 2. Open the CNL Command Line Interface
 
-- Tại đường dẫn `cirnet-cli` hãy nhập lệnh:
+- In the `cirnet-cli` directory, enter the following commands:
 
 ```powershell
-# Lệnh build CNL
+# Build CNL command
 cargo build --release
-# Lệnh chạy CNL
+# Run CNL command
 cargo run --release
 ```
 
-## 3. Chuẩn bị mã nguồn
+## 3. Prepare the Source Code
 
-Đặt **7 repository cùng cấp** trong một thư mục workspace.
+Place **7 repositories at the same directory level** within a workspace directory.
 
 ```powershell
 $workspace = "C:\CIRNETLAB"
@@ -70,48 +70,48 @@ foreach ($repo in $repos) {
 Set-Location .\cirnet-cli
 ```
 
-Cần có quyền GitHub đối với repository riêng tư. Nếu đã có đủ 7 thư mục local, bỏ qua bước clone và mở trực tiếp thư mục `cirnet-cli`.
+GitHub access permissions are required for private repositories. If all 7 local directories already exist, skip the cloning step and open the `cirnet-cli` directory directly.
 
-## 4. Build và mở Browser Interface
+## 4. Build and Open the Browser Interface
 
-Từ thư mục `cirnet-cli`:
+From the `cirnet-cli` directory:
 
 ```powershell
-# Kiểm tra toolchain
+# Check the toolchain
 cnl doctor
-# Xác nhận môi trường
+# Verify the environment
 cnl setup
-# Build chương trình
+# Build the program
 cnl build --all
-# Mở Browser Interface
+# Open the Browser Interface
 cnl run --desktop interface --initialize-db
 ```
 
-- `cargo install` cài `cnl.exe` (mặc định trong `%USERPROFILE%\.cargo\bin`). Nếu chưa nhận lệnh `cnl`, mở lại terminal và kiểm tra `PATH`.
-- `cnl doctor` kiểm tra toolchain; `cnl setup` xác nhận môi trường.
-- `cnl build --all` build và đóng gói native candidate, lưu artifacts **ngoài Git checkout**.
-- `--initialize-db` chỉ dành cho **lần tạo SQLite đầu tiên** trong profile mới. Các lần sau dùng `cnl run --desktop interface`.
+- `cargo install` installs `cnl.exe` (by default in `%USERPROFILE%\.cargo\bin`). If the `cnl` command is not yet recognized, reopen the terminal and check `PATH`.
+- `cnl doctor` checks the toolchain; `cnl setup` verifies the environment.
+- `cnl build --all` builds and packages the native candidate, storing artifacts **outside the Git checkout**.
+- `--initialize-db` is only for the **initial SQLite creation** in a new profile. For subsequent runs, use `cnl run --desktop interface`.
 
-| Chế độ | Lệnh | URL mặc định |
+| Mode | Command | Default URL |
 | --- | --- | --- |
 | Development (Vite, hot reload) | `cnl run --desktop interface` | http://127.0.0.1:5173 |
-| Packaged (Rust Remote phục vụ web đã build) | `cnl run --desktop interface --mode packaged` | http://127.0.0.1:8000 |
+| Packaged (Rust Remote serves the built web interface) | `cnl run --desktop interface --mode packaged` | http://127.0.0.1:8000 |
 
-Giao diện Vue/TypeScript thuộc `cirnet-interface-next`; backend Rust REST/WebSocket thuộc `cirnet-remote-next`. Dùng `cnl stop` trước khi đổi chế độ trong cùng profile.
+The Vue/TypeScript interface belongs to `cirnet-interface-next`; the Rust REST/WebSocket backend belongs to `cirnet-remote-next`. Use `cnl stop` before switching modes within the same profile.
 
-## 5. Lệnh thường dùng
+## 5. Common Commands
 
-| Lệnh | Chức năng |
+| Command | Function |
 | --- | --- |
-| `cargo build --release` | Build chương trình |
-| `cargo run --release` | Chạy chương trình |
-| `cnl build --all` | Build và đóng gói native candidate |
-| `cnl run --desktop interface` | Chạy Browser interface |
-| `cnl tui --lang vi` | Mở TUI bằng tiếng Việt |
-| `cnl repos` | Mở Multi-Repository Manager |
-| `cnl status` | Kiểm tra các dịch vụ |
-| `cnl stop` | Dừng phiên runtime do CLI quản lý |
-| `cnl verify` | Kiểm chứng native candidate |
-| `cnl setup --browser` | Cài Chromium phục vụ Playwright (tùy chọn) |
+| `cargo build --release` | Build the program |
+| `cargo run --release` | Run the program |
+| `cnl build --all` | Build and package the native candidate |
+| `cnl run --desktop interface` | Run the Browser interface |
+| `cnl tui --lang vi` | Open the TUI in Vietnamese |
+| `cnl repos` | Open the Multi-Repository Manager |
+| `cnl status` | Check services |
+| `cnl stop` | Stop the CLI-managed runtime session |
+| `cnl verify` | Verify the native candidate |
+| `cnl setup --browser` | Install Chromium for Playwright (optional) |
 
-**Tài liệu:** [Hướng dẫn tiếng Việt](docs/vi/index.md) · [English guide](docs/en/index.md) · [Tham chiếu lệnh VI](docs/vi/commands.md) · [Command reference EN](docs/en/commands.md)
+**Documentation:** [Vietnamese guide](docs/vi/index.md) · [English guide](docs/en/index.md) · [Command reference VI](docs/vi/commands.md) · [Command reference EN](docs/en/commands.md)
