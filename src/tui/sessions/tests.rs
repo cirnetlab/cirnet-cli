@@ -493,7 +493,7 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
     assert!(!state.mouse(&mut manager, &launch_layout, &launch_hits, launch_hover));
     let (launch_frame, launch_hits) = render::frame(&manager, &launch_layout, &state);
     let row = launch_frame.rows[usize::from(launch_hover.row)].contents();
-    assert!(row.ends_with(" ◫  × "), "{row:?}");
+    assert!(row.ends_with("▯▯  × "), "{row:?}");
     assert!(!state.mouse(
         &mut manager,
         &launch_layout,
@@ -544,7 +544,7 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
     for row_index in [sidebar.y + 1, sidebar.y + 2] {
         let row = frame.rows[usize::from(row_index)].contents();
         assert!(
-            row.contains("▣ cmd fixture-two"),
+            row.contains(">_ cmd fixture-two"),
             "sidebar session row is missing: {row:?}"
         );
     }
