@@ -397,7 +397,7 @@ impl Busy {
 }
 
 pub(super) enum Placement {
-    Active,
+    Independent,
     Split(SessionId),
     Replace(SessionId),
 }
@@ -436,7 +436,7 @@ pub(super) struct State {
     pub(super) sidebar_selected: Option<SessionId>,
     pub(super) sidebar_hover: Option<SessionId>,
     pub(super) hovered_command: Option<Command>,
-    divider_drag: bool,
+    divider_drag: Option<[SessionId; 2]>,
     native_mouse: [Option<MouseCapture>; 3],
     events: SyncSender<WorkspaceEvent>,
 }
@@ -461,7 +461,7 @@ impl State {
             sidebar_selected: None,
             sidebar_hover: None,
             hovered_command: None,
-            divider_drag: false,
+            divider_drag: None,
             native_mouse: [None; 3],
             events,
         }
@@ -502,7 +502,7 @@ impl State {
                 let mut session = *session;
                 session.watch(Some(&self.events));
                 match placement {
-                    Placement::Active => {
+                    Placement::Independent => {
                         let id = manager.insert(session);
                         manager.arrangement.activate(id);
                     }
@@ -578,7 +578,7 @@ impl State {
     fn pane_size(&self, manager: &Manager, placement: &Placement) -> portable_pty::PtySize {
         let mut arrangement = manager.arrangement.clone();
         let id = match placement {
-            Placement::Active => {
+            Placement::Independent => {
                 arrangement.activate(0);
                 0
             }
@@ -631,7 +631,7 @@ impl State {
             return;
         }
         let (workspace, flags) = self.catalog.repository_snapshot();
-        let size = self.pane_size(manager, &Placement::Active);
+        let size = self.pane_size(manager, &Placement::Independent);
         let vi = self.vi;
         self.begin(Busy::Opening, move || {
             let (key, cwd, _) =
@@ -651,7 +651,10 @@ impl State {
             );
             let mut session = Session::start(&key, &cwd, Some(shell), size, vi)?;
             session.repository = choice.name;
-            Ok(Completed::Session(Box::new(session), Placement::Active))
+            Ok(Completed::Session(
+                Box::new(session),
+                Placement::Independent,
+            ))
         });
     }
 
@@ -694,11 +697,16 @@ impl State {
         }
     }
 
-    pub(super) fn sidebar_action_enabled(&self, manager: &Manager, command: Command) -> bool {
+    pub(super) fn sidebar_action_enabled(
+        &self,
+        manager: &Manager,
+        id: SessionId,
+        command: Command,
+    ) -> bool {
         self.busy.is_none()
             && match command {
                 Command::Split => {
-                    !manager.arrangement.split_active()
+                    !manager.arrangement.is_split_member(id)
                         && manager.entries.len() < super::MAX_SESSIONS
                 }
                 Command::Close => true,
@@ -752,7 +760,7 @@ impl State {
                     let place = if command == Command::Split {
                         Placement::Split(id)
                     } else {
-                        Placement::Active
+                        Placement::Independent
                     };
                     self.start_existing(manager, place, id);
                 }
@@ -760,7 +768,9 @@ impl State {
             Command::MovePane => manager.arrangement.move_pane(),
             Command::FocusPane => {
                 manager.arrangement.focus_other();
-                manager.arrangement.sidebar_focused = false;
+                if let Some(id) = manager.arrangement.active() {
+                    manager.remember(id);
+                }
             }
             Command::Maximize => manager.arrangement.toggle_maximized(),
             Command::ResizeLess => manager.arrangement.adjust_split(-5),
@@ -1036,7 +1046,7 @@ impl State {
         let (x, y) = (mouse.column, mouse.row);
         let hit = hits.at(x, y);
         if mouse.kind == Down(Left) {
-            self.divider_drag = false;
+            self.divider_drag = None;
             if let Some(mark) = &mut self.marked {
                 mark.dragging = false;
             }
@@ -1098,11 +1108,16 @@ impl State {
             }
             return false;
         }
-        if self.divider_drag && matches!(mouse.kind, Drag(Left) | Up(Left)) {
-            if let Some(ratio) = layout.ratio_at(x, y) {
+        if let Some(panes) = self.divider_drag
+            && matches!(mouse.kind, Drag(Left) | Up(Left))
+        {
+            let same_group = manager.arrangement.panes() == panes.map(Some);
+            if same_group && let Some(ratio) = layout.ratio_at(x, y) {
                 manager.arrangement.set_split_ratio(ratio);
             }
-            self.divider_drag = mouse.kind != Up(Left);
+            if !same_group || mouse.kind == Up(Left) {
+                self.divider_drag = None;
+            }
             return false;
         }
         if matches!(mouse.kind, Drag(Left) | Up(Left))
@@ -1124,8 +1139,11 @@ impl State {
         if matches!(mouse.kind, Drag(_) | Up(_)) {
             return false;
         }
-        if mouse.kind == Down(Left) && layout.divider_at(x, y) {
-            self.divider_drag = true;
+        if mouse.kind == Down(Left)
+            && layout.divider_at(x, y)
+            && let [Some(first), Some(second)] = manager.arrangement.panes()
+        {
+            self.divider_drag = Some([first, second]);
             self.marked = None;
             return false;
         }
@@ -1152,7 +1170,9 @@ impl State {
                 return false;
             }
             (Some(Hit::SessionAction(id, command)), Down(Left)) => {
-                if manager.session(id).is_some() && self.sidebar_action_enabled(manager, command) {
+                if manager.session(id).is_some()
+                    && self.sidebar_action_enabled(manager, id, command)
+                {
                     match command {
                         Command::Split => self.start_existing(manager, Placement::Split(id), id),
                         Command::Close => self.close_session(manager, id),
@@ -1169,8 +1189,7 @@ impl State {
                 return false;
             }
             (Some(Hit::PaneActions(id)), Down(Left | Right)) => {
-                manager.arrangement.activate(id);
-                manager.arrangement.sidebar_focused = false;
+                self.focus_session(manager, id);
                 self.open_menu(manager, Some((x, y.saturating_add(1))));
                 return false;
             }
@@ -1287,7 +1306,7 @@ impl State {
         self.sidebar_rows(manager).0
     }
 
-    pub(super) fn sidebar_rows(&self, manager: &Manager) -> (Vec<SessionId>, Option<Range<usize>>) {
+    pub(super) fn sidebar_rows(&self, manager: &Manager) -> (Vec<SessionId>, Vec<Range<usize>>) {
         let query = self
             .sidebar_query
             .as_ref()
@@ -1304,8 +1323,8 @@ impl State {
             })
             .map(|s| s.id)
             .collect();
-        let split = manager.arrangement.group_sidebar(&mut ids);
-        (ids, split)
+        let groups = manager.arrangement.group_sidebar(&mut ids);
+        (ids, groups)
     }
 
     fn step_sidebar(&mut self, manager: &Manager, step: isize) {
@@ -1508,7 +1527,7 @@ pub(super) fn interact<W: io::Write>(
                             }
                             Event::FocusLost => {
                                 state.release_mouse(manager);
-                                state.divider_drag = false;
+                                state.divider_drag = None;
                                 state.marked = None;
                                 state.sidebar_hover = None;
                                 state.hovered_command = None;

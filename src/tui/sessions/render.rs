@@ -326,7 +326,7 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
         return;
     }
     let vi = state.vi;
-    let (ids, split) = state.sidebar_rows(manager);
+    let (ids, groups) = state.sidebar_rows(manager);
     let active = manager.arrangement.active();
     let selected = state.sidebar_selected.or(active);
     let title = format!(
@@ -416,7 +416,7 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
         } else {
             &session.shell
         };
-        let tree = match split.as_ref().filter(|group| group.contains(&index)) {
+        let tree = match groups.iter().find(|group| group.contains(&index)) {
             Some(group) if index == group.start => "┌ ",
             Some(group) if index + 1 == group.end => "└ ",
             Some(_) => "├ ",
@@ -435,7 +435,7 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
             for (offset, command, icon) in [(6, Command::Split, "▯▯ "), (3, Command::Close, " × ")]
             {
                 let x = area.right() - offset;
-                let enabled = state.sidebar_action_enabled(manager, command);
+                let enabled = state.sidebar_action_enabled(manager, id, command);
                 let mut button = Line::default();
                 button.push(
                     if enabled {
@@ -524,13 +524,19 @@ fn footer(frame: &mut Frame, manager: &Manager, state: &State) {
         && state.sidebar_hover.is_some()
     {
         match command {
-            Command::Split if manager.arrangement.split_active() => locale(
-                [
-                    " Split Terminal · two panes open",
-                    " Chia terminal · đang mở hai pane",
-                ],
-                vi,
-            ),
+            Command::Split
+                if state
+                    .sidebar_hover
+                    .is_some_and(|id| manager.arrangement.is_split_member(id)) =>
+            {
+                locale(
+                    [
+                        " Split Terminal · two panes open",
+                        " Chia terminal · đang mở hai pane",
+                    ],
+                    vi,
+                )
+            }
             Command::Split => locale([" Split Terminal", " Chia terminal"], vi),
             Command::Close => locale([" Kill Terminal", " Đóng terminal"], vi),
             _ => "",

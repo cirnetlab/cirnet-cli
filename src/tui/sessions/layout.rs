@@ -17,118 +17,175 @@ pub(super) enum Sidebar {
 }
 
 #[derive(Clone, Debug)]
+struct Split {
+    panes: [SessionId; 2],
+    ratio: u16,
+    maximized: bool,
+}
+
+#[derive(Clone, Debug)]
 pub(super) struct Arrangement {
-    pub(super) panes: [Option<SessionId>; 2],
-    pub(super) focused: usize,
+    active: Option<SessionId>,
+    splits: Vec<Split>,
     pub(super) sidebar: Sidebar,
     pub(super) sidebar_focused: bool,
-    split_ratio: u16,
-    maximized: bool,
+    preferred_split_ratio: u16,
 }
 
 impl Default for Arrangement {
     fn default() -> Self {
         Self {
-            panes: [None, None],
-            focused: 0,
+            active: None,
+            splits: Vec::new(),
             sidebar: Sidebar::Auto,
             sidebar_focused: false,
-            split_ratio: 50,
-            maximized: false,
+            preferred_split_ratio: 50,
         }
     }
 }
 
 impl Arrangement {
     pub(super) fn active(&self) -> Option<SessionId> {
-        self.panes[self.focused]
+        self.active
+    }
+
+    pub(super) fn panes(&self) -> [Option<SessionId>; 2] {
+        self.active_split()
+            .map_or([self.active, None], |split| split.panes.map(Some))
     }
 
     pub(super) fn activate(&mut self, id: SessionId) {
-        self.focused = self
-            .panes
-            .iter()
-            .position(|pane| *pane == Some(id))
-            .unwrap_or(self.focused);
-        self.panes[self.focused] = Some(id);
+        self.active = Some(id);
     }
 
     pub(super) fn split(&mut self, id: SessionId) {
-        self.focused = 1 - self.focused;
-        self.panes[self.focused] = Some(id);
+        if let Some(source) = self.active
+            && source != id
+            && !self.is_split_member(source)
+            && !self.is_split_member(id)
+        {
+            self.splits.push(Split {
+                panes: [source, id],
+                ratio: self.preferred_split_ratio,
+                maximized: false,
+            });
+            self.activate(id);
+        }
+    }
+
+    fn split_index(&self, id: SessionId) -> Option<usize> {
+        self.splits
+            .iter()
+            .position(|split| split.panes.contains(&id))
+    }
+
+    pub(super) fn is_split_member(&self, id: SessionId) -> bool {
+        self.split_index(id).is_some()
+    }
+
+    fn active_split_index(&self) -> Option<usize> {
+        self.split_index(self.active?)
+    }
+
+    fn active_split(&self) -> Option<&Split> {
+        self.splits.get(self.active_split_index()?)
     }
 
     pub(super) fn split_active(&self) -> bool {
-        self.panes.iter().all(Option::is_some)
+        self.active_split_index().is_some()
     }
 
-    pub(super) fn group_sidebar(&self, ids: &mut [SessionId]) -> Option<Range<usize>> {
-        let [Some(first), Some(second)] = self.panes else {
-            return None;
-        };
-        let first = ids.iter().position(|id| *id == first)?;
-        let second = ids.iter().position(|id| *id == second)?;
-        let start = first.min(second);
-        let end = first.max(second);
-        // Keep the split at its earliest list position and the standalone order intact.
-        ids[start..=end].rotate_right(1);
-        if first < second {
-            ids.swap(start, start + 1);
+    pub(super) fn group_sidebar(&self, ids: &mut [SessionId]) -> Vec<Range<usize>> {
+        let mut groups = Vec::new();
+        let mut start = 0;
+        while start < ids.len() {
+            let id = ids[start];
+            if let Some(split) = self.split_index(id).map(|index| &self.splits[index]) {
+                let [first, second] = split.panes;
+                let partner = if id == first { second } else { first };
+                let end = start + 1;
+                if let Some(offset) = ids[end..].iter().position(|entry| *entry == partner) {
+                    // Place each group at its earliest list position and keep all other rows stable.
+                    ids[end..=end + offset].rotate_right(1);
+                    if id != first {
+                        ids.swap(start, end);
+                    }
+                    groups.push(start..start + 2);
+                    start += 2;
+                    continue;
+                }
+            }
+            start += 1;
         }
-        Some(start..start + 2)
+        groups
     }
 
     pub(super) fn split_ratio(&self) -> u16 {
-        self.split_ratio
+        self.active_split()
+            .map_or(self.preferred_split_ratio, |split| split.ratio)
+    }
+
+    pub(super) fn preferred_split_ratio(&self) -> u16 {
+        self.preferred_split_ratio
+    }
+
+    pub(super) fn set_preferred_split_ratio(&mut self, ratio: u16) {
+        self.preferred_split_ratio = ratio.min(100);
     }
 
     pub(super) fn set_split_ratio(&mut self, ratio: u16) {
-        self.split_ratio = ratio.min(100);
+        self.set_preferred_split_ratio(ratio);
+        if let Some(index) = self.active_split_index() {
+            self.splits[index].ratio = self.preferred_split_ratio;
+        }
     }
 
     pub(super) fn adjust_split(&mut self, delta: i16) {
-        self.split_ratio = (i32::from(self.split_ratio) + i32::from(delta)).clamp(0, 100) as u16;
+        self.set_split_ratio(
+            (i32::from(self.split_ratio()) + i32::from(delta)).clamp(0, 100) as u16,
+        );
     }
 
     pub(super) fn focus_other(&mut self) {
-        if self.split_active() {
-            self.focused = 1 - self.focused;
+        if let Some(split) = self.active_split() {
+            let next = split.panes[usize::from(Some(split.panes[0]) == self.active)];
+            self.activate(next);
             self.sidebar_focused = false;
         }
     }
 
     pub(super) fn toggle_maximized(&mut self) {
-        if self.split_active() {
-            self.maximized = !self.maximized;
+        if let Some(index) = self.active_split_index() {
+            let split = &mut self.splits[index];
+            split.maximized = !split.maximized;
             self.sidebar_focused = false;
         }
     }
 
     pub(super) fn is_maximized(&self) -> bool {
-        self.maximized
+        self.active_split().is_some_and(|split| split.maximized)
     }
 
     pub(super) fn unsplit(&mut self) {
-        self.panes = [self.active(), None];
-        self.focused = 0;
-        self.maximized = false;
+        if let Some(index) = self.active_split_index() {
+            self.splits.remove(index);
+        }
     }
 
     pub(super) fn move_pane(&mut self) {
-        if self.split_active() {
-            self.panes.swap(0, 1);
-            self.focused = 1 - self.focused;
+        if let Some(index) = self.active_split_index() {
+            self.splits[index].panes.swap(0, 1);
         }
     }
 
     pub(super) fn close(&mut self, id: SessionId, fallback: Option<SessionId>) {
-        let Some(index) = self.panes.iter().position(|pane| *pane == Some(id)) else {
-            return;
-        };
-        let remaining = self.panes[1 - index].or(fallback);
-        self.panes = [remaining, None];
-        self.focused = 0;
-        self.maximized = false;
+        let partner = self.split_index(id).map(|index| {
+            let split = self.splits.remove(index);
+            split.panes[usize::from(split.panes[0] == id)]
+        });
+        if self.active == Some(id) {
+            self.active = partner.or(fallback);
+        }
     }
 }
 
@@ -235,7 +292,7 @@ impl Layout {
         if body.width == 0 || body.height < 2 {
             return layout;
         }
-        let [first, second] = arrangement.panes;
+        let [first, second] = arrangement.panes();
         if !arrangement.is_maximized()
             && let (Some(first), Some(second)) = (first, second)
         {
@@ -287,7 +344,7 @@ impl Layout {
                 return layout;
             }
         }
-        let focused = arrangement.focused;
+        let focused = usize::from(second.is_some() && second == arrangement.active());
         layout.panes[focused] = arrangement.active().map(|id| Pane::new(id, body));
         layout
     }
@@ -349,16 +406,22 @@ mod tests {
         let mut arrangement = split();
         let order = [8, 1, 9, 10, 2, 11];
         let mut ids = order;
-        assert_eq!(arrangement.group_sidebar(&mut ids), Some(1..3));
+        assert_eq!(
+            arrangement.group_sidebar(&mut ids).as_slice(),
+            std::slice::from_ref(&(1..3))
+        );
         assert_eq!(ids, [8, 1, 2, 9, 10, 11]);
 
         arrangement.move_pane();
         let mut ids = order;
-        assert_eq!(arrangement.group_sidebar(&mut ids), Some(1..3));
+        assert_eq!(
+            arrangement.group_sidebar(&mut ids).as_slice(),
+            std::slice::from_ref(&(1..3))
+        );
         assert_eq!(ids, [8, 2, 1, 9, 10, 11]);
 
         let mut filtered = [8, 2, 11];
-        assert_eq!(arrangement.group_sidebar(&mut filtered), None);
+        assert!(arrangement.group_sidebar(&mut filtered).is_empty());
         assert_eq!(filtered, [8, 2, 11]);
     }
 
@@ -367,16 +430,47 @@ mod tests {
         let mut arrangement = split();
         let mut ids = [1, 3, 2];
         arrangement.unsplit();
-        assert_eq!(arrangement.group_sidebar(&mut ids), None);
+        assert!(arrangement.group_sidebar(&mut ids).is_empty());
         assert_eq!(ids, [1, 3, 2]);
 
         arrangement.activate(1);
         arrangement.split(2);
         arrangement.close(2, None);
         let mut ids = [1, 3];
-        assert_eq!(arrangement.group_sidebar(&mut ids), None);
+        assert!(arrangement.group_sidebar(&mut ids).is_empty());
         assert_eq!(ids, [1, 3]);
         assert_eq!(arrangement.active(), Some(1));
+    }
+
+    #[test]
+    fn switching_independent_sessions_preserves_multiple_splits_and_their_layouts() {
+        let mut arrangement = split();
+        arrangement.set_split_ratio(65);
+        arrangement.toggle_maximized();
+        arrangement.activate(3);
+        assert_eq!(arrangement.panes(), [Some(3), None]);
+        assert!(!arrangement.is_maximized());
+        arrangement.split(4);
+        arrangement.set_split_ratio(30);
+        let mut ids = [1, 3, 2, 4, 5];
+        assert_eq!(arrangement.group_sidebar(&mut ids), [0..2, 2..4]);
+        assert_eq!(ids, [1, 2, 3, 4, 5]);
+
+        arrangement.activate(2);
+        assert_eq!(arrangement.panes(), [Some(1), Some(2)]);
+        assert_eq!(arrangement.split_ratio(), 65);
+        assert!(arrangement.is_maximized());
+
+        arrangement.activate(3);
+        assert_eq!(arrangement.panes(), [Some(3), Some(4)]);
+        assert_eq!(arrangement.split_ratio(), 30);
+        assert!(!arrangement.is_maximized());
+
+        arrangement.close(2, None);
+        assert_eq!(arrangement.active(), Some(3));
+        assert_eq!(arrangement.panes(), [Some(3), Some(4)]);
+        arrangement.activate(1);
+        assert_eq!(arrangement.panes(), [Some(1), None]);
     }
 
     #[test]
@@ -478,6 +572,6 @@ mod tests {
         arrangement.toggle_maximized();
         arrangement.unsplit();
         assert!(!arrangement.is_maximized());
-        assert_eq!(arrangement.panes, [Some(3), None]);
+        assert_eq!(arrangement.panes(), [Some(3), None]);
     }
 }

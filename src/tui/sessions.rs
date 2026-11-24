@@ -41,6 +41,7 @@ pub(super) struct Manager {
     arrangement: Arrangement,
     next_id: SessionId,
     recent: Vec<PathBuf>,
+    recent_focus: Vec<SessionId>,
 }
 
 impl Manager {
@@ -79,7 +80,8 @@ impl Manager {
                 Some(false) => Sidebar::Hidden,
                 None => Sidebar::Auto,
             };
-            self.arrangement.set_split_ratio(prefs.split_ratio);
+            self.arrangement
+                .set_preferred_split_ratio(prefs.split_ratio);
         }
         let size = console::size()?;
         let index = self.attach(key, &cwd, shell, pty_size(size), vi)?;
@@ -116,6 +118,8 @@ impl Manager {
             self.recent.retain(|entry| entry != &path);
             self.recent.insert(0, path);
             self.recent.truncate(MAX_SESSIONS);
+            self.recent_focus.retain(|entry| *entry != id);
+            self.recent_focus.insert(0, id);
         }
     }
 
@@ -212,11 +216,16 @@ impl Manager {
     fn take(&mut self, id: SessionId) -> Option<Session> {
         let index = self.position(id)?;
         let session = self.entries.remove(index);
-        let fallback = self
-            .entries
-            .get(index.min(self.entries.len().saturating_sub(1)))
-            .map(|session| session.id);
+        self.recent_focus.retain(|entry| *entry != id);
+        let fallback = self.recent_focus.first().copied().or_else(|| {
+            self.entries
+                .get(index.min(self.entries.len().saturating_sub(1)))
+                .map(|session| session.id)
+        });
         self.arrangement.close(id, fallback);
+        if let Some(active) = self.arrangement.active() {
+            self.remember(active);
+        }
         Some(session)
     }
 }
@@ -257,7 +266,7 @@ impl From<&Arrangement> for DisplayPreferences {
                 Sidebar::Visible => Some(true),
                 Sidebar::Hidden => Some(false),
             },
-            split_ratio: arrangement.split_ratio(),
+            split_ratio: arrangement.preferred_split_ratio(),
         }
     }
 }

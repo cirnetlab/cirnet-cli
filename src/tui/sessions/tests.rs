@@ -327,13 +327,64 @@ fn moving_session_swaps_visible_panes_without_changing_active_identity() {
     arrangement.activate(1);
     arrangement.split(2);
     arrangement.move_pane();
-    assert_eq!(arrangement.panes, [Some(2), Some(1)]);
+    assert_eq!(arrangement.panes(), [Some(2), Some(1)]);
     assert_eq!(arrangement.active(), Some(2));
     arrangement.activate(3);
-    assert_eq!(arrangement.panes, [Some(3), Some(1)]);
+    assert_eq!(arrangement.panes(), [Some(3), None]);
     arrangement.close(3, Some(2));
-    assert_eq!(arrangement.active(), Some(1));
-    assert_eq!(arrangement.panes, [Some(1), None]);
+    assert_eq!(arrangement.panes(), [Some(2), Some(1)]);
+    assert_eq!(arrangement.active(), Some(2));
+}
+
+#[test]
+fn divider_drag_cannot_resize_another_terminal_group() {
+    use super::workspace::{Catalog, State};
+    use crossterm::event::MouseButton;
+
+    let size = (125, 28);
+    let workspace = Workspace {
+        root: std::env::temp_dir(),
+    };
+    let flags = crate::cli::app().get_matches_from(["cnl"]);
+    let (events, _receiver) = std::sync::mpsc::sync_channel(1);
+    let mut state = State::new(
+        size,
+        Catalog::new(&workspace, &flags, Some(&[])),
+        false,
+        events,
+    );
+    let mut manager = Manager::default();
+    manager.arrangement.activate(1);
+    manager.arrangement.split(2);
+    manager.arrangement.activate(3);
+    manager.arrangement.split(4);
+    manager.arrangement.activate(1);
+
+    let first = Layout::new(size, &manager.arrangement);
+    let (_, hits) = render::frame(&manager, &first, &state);
+    let x = first.vertical_divider.unwrap();
+    let press = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: x,
+        row: first.area.y,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(!state.mouse(&mut manager, &first, &hits, press));
+    manager.arrangement.activate(4);
+    let second = Layout::new(size, &manager.arrangement);
+    let (_, hits) = render::frame(&manager, &second, &state);
+    let ratio = manager.arrangement.split_ratio();
+    assert!(!state.mouse(
+        &mut manager,
+        &second,
+        &hits,
+        MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: x + 12,
+            ..press
+        }
+    ));
+    assert_eq!(manager.arrangement.split_ratio(), ratio);
 }
 
 #[test]
@@ -802,7 +853,7 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
 
     state.command(&mut manager, Control::MovePane);
     state.command(&mut manager, Control::MoveDown);
-    assert_eq!(manager.arrangement.panes, [Some(split), Some(original)]);
+    assert_eq!(manager.arrangement.panes(), [Some(split), Some(original)]);
     assert_eq!(
         manager
             .entries
@@ -821,6 +872,72 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
         manager.active().unwrap().cwd,
         *rows[1].path.as_ref().unwrap()
     );
+
+    key(&mut state, &mut manager, KeyCode::F(1));
+    finish_job(&mut state, &mut manager, &receiver);
+    send(&mut state, &mut manager, "fixture-one");
+    assert!(matches!(state.modal, Some(Modal::Shells { .. })));
+    key(&mut state, &mut manager, KeyCode::Enter);
+    finish_job(&mut state, &mut manager, &receiver);
+
+    let standalone = manager.active().unwrap().id;
+    let standalone_process = witness(manager.active().unwrap());
+    assert_eq!(manager.active().unwrap().repository, "fixture-one");
+    let solo = Layout::new(size, &manager.arrangement);
+    assert_eq!(solo.panes.iter().flatten().count(), 1);
+    assert!(solo.pane(standalone).is_some());
+    assert_eq!(process_state(&original_process, 0), WAIT_TIMEOUT);
+    assert_eq!(process_state(&split_process, 0), WAIT_TIMEOUT);
+
+    let side = solo.sidebar.unwrap();
+    let (solo_frame, solo_hits) = render::frame(&manager, &solo, &state);
+    assert!(
+        solo_frame.rows[usize::from(side.y + 1)]
+            .contents()
+            .contains("┌ >_ cmd fixture-two")
+    );
+    assert!(
+        solo_frame.rows[usize::from(side.y + 2)]
+            .contents()
+            .contains("└ >_ cmd Kiểm tra 界")
+    );
+    assert_eq!(
+        solo_hits.at(side.x, side.y + 2),
+        Some(render::Hit::Session(original))
+    );
+    let click = |row| MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: side.x + 2,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(!state.mouse(&mut manager, &solo, &solo_hits, click(side.y + 2)));
+    assert_eq!(manager.arrangement.active(), Some(original));
+    let restored = Layout::new(size, &manager.arrangement);
+    assert!(restored.pane(original).is_some() && restored.pane(split).is_some());
+    assert!(restored.pane(standalone).is_none());
+    send(
+        &mut state,
+        &mut manager,
+        "echo RESTORED:[%CNL_SPLIT_CHECK%]",
+    );
+    output_contains(manager.session(original).unwrap(), "RESTORED:[original]");
+
+    let (_, restored_hits) = render::frame(&manager, &restored, &state);
+    assert_eq!(
+        restored_hits.at(side.x, side.y + 3),
+        Some(render::Hit::Session(standalone))
+    );
+    assert!(!state.mouse(&mut manager, &restored, &restored_hits, click(side.y + 3)));
+    key(&mut state, &mut manager, KeyCode::F(8));
+    assert!(matches!(state.modal, Some(Modal::Confirm(id, Control::Close)) if id == standalone));
+    key(&mut state, &mut manager, KeyCode::Enter);
+    finish_job(&mut state, &mut manager, &receiver);
+    assert_eq!(process_state(&standalone_process, 2000), WAIT_OBJECT_0);
+    assert_eq!(manager.arrangement.active(), Some(original));
+    let restored = Layout::new(size, &manager.arrangement);
+    assert!(restored.pane(original).is_some() && restored.pane(split).is_some());
+    assert_eq!(process_state(&split_process, 0), WAIT_TIMEOUT);
 
     state.command(&mut manager, Control::Duplicate);
     finish_job(&mut state, &mut manager, &receiver);
@@ -847,9 +964,10 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
     key(&mut state, &mut manager, KeyCode::Enter);
     finish_job(&mut state, &mut manager, &receiver);
     assert!(manager.session(duplicate).is_none());
-    let (remaining, group) = state.sidebar_rows(&manager);
+    let (remaining, groups) = state.sidebar_rows(&manager);
     assert_eq!(remaining, [split, original]);
-    assert!(group.is_none());
+    assert_eq!(groups.as_slice(), std::slice::from_ref(&(0..2)));
+    assert_eq!(manager.arrangement.active(), Some(original));
     assert_eq!(process_state(&duplicate_process, 2000), WAIT_OBJECT_0);
     assert_eq!(process_state(&original_process, 0), WAIT_TIMEOUT);
 
@@ -861,6 +979,8 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
     assert_eq!(manager.active().unwrap().id, original);
     assert_eq!(manager.active().unwrap().title(), "Kiểm tra 界");
     assert_eq!(process_state(&original_process, 2000), WAIT_OBJECT_0);
+    assert_eq!(process_state(&split_process, 0), WAIT_TIMEOUT);
+    assert_eq!(manager.arrangement.panes(), [Some(split), Some(original)]);
     send(
         &mut state,
         &mut manager,
