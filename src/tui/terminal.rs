@@ -112,6 +112,8 @@ pub(super) enum PalettePart {
     ContextEdge,
     ContextItem,
     ContextSelected,
+    SessionActive,
+    SessionHover,
 }
 
 pub(super) fn color_enabled() -> bool {
@@ -274,6 +276,14 @@ impl Style {
             Selected => (depth.color((237, 237, 239), 255, White), Some(suggestions)),
             ContextEdge => (depth.color((100, 108, 118), 242, Grey), None),
             ContextItem => (depth.color((232, 233, 236), 254, White), Some(suggestions)),
+            SessionActive => (
+                depth.color((255, 224, 199), 223, White),
+                Some(depth.color((66, 48, 41), 237, DarkGrey)),
+            ),
+            SessionHover => (
+                depth.color((242, 242, 243), 255, White),
+                Some(depth.color((44, 46, 50), 236, DarkGrey)),
+            ),
             ContextSelected => (
                 depth.color((248, 249, 251), 255, White),
                 Some(depth.color((55, 70, 86), 238, DarkBlue)),
@@ -282,7 +292,8 @@ impl Style {
         Self {
             color: Some(color),
             background,
-            attribute: matches!(part, Selected | ContextSelected).then_some(Attribute::Bold),
+            attribute: matches!(part, Selected | ContextSelected | SessionActive)
+                .then_some(Attribute::Bold),
             ..Self::default()
         }
     }

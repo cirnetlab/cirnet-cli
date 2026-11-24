@@ -481,7 +481,29 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
     });
     send(&mut state, &mut manager, "set CNL_SPLIT_CHECK=original");
 
-    key(&mut state, &mut manager, KeyCode::F(3));
+    let launch_layout = Layout::new(state.size, &manager.arrangement);
+    let launch_sidebar = launch_layout.sidebar.unwrap();
+    let (_, launch_hits) = render::frame(&manager, &launch_layout, &state);
+    let launch_hover = MouseEvent {
+        kind: MouseEventKind::Moved,
+        row: launch_sidebar.y + 1,
+        column: launch_sidebar.x + 2,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(!state.mouse(&mut manager, &launch_layout, &launch_hits, launch_hover));
+    let (launch_frame, launch_hits) = render::frame(&manager, &launch_layout, &state);
+    let row = launch_frame.rows[usize::from(launch_hover.row)].contents();
+    assert!(row.ends_with(" ◫  × "), "{row:?}");
+    assert!(!state.mouse(
+        &mut manager,
+        &launch_layout,
+        &launch_hits,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: launch_sidebar.right() - 5,
+            ..launch_hover
+        }
+    ));
     finish_job(&mut state, &mut manager, &receiver);
     let split = manager.active().unwrap().id;
     assert_ne!(split, original);
@@ -522,7 +544,7 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
     for row_index in [sidebar.y + 1, sidebar.y + 2] {
         let row = frame.rows[usize::from(row_index)].contents();
         assert!(
-            row.ends_with(" CMD ● "),
+            row.contains("▣ cmd fixture-two"),
             "sidebar session row is missing: {row:?}"
         );
     }
@@ -539,6 +561,45 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
             .contents()
             .contains("fixture-two")
     );
+
+    let hover = MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: sidebar.x + 3,
+        row: sidebar.y + 1,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(!state.mouse(&mut manager, &layout, &hits, hover));
+    let (_, hovered_hits) = render::frame(&manager, &layout, &state);
+    assert_eq!(
+        hovered_hits.at(sidebar.right() - 5, hover.row),
+        Some(render::Hit::SessionAction(original, Control::Split))
+    );
+    assert_eq!(
+        hovered_hits.at(sidebar.right() - 2, hover.row),
+        Some(render::Hit::SessionAction(original, Control::Close))
+    );
+    let click = |column| MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        ..hover
+    };
+    assert!(!state.mouse(
+        &mut manager,
+        &layout,
+        &hovered_hits,
+        click(sidebar.right() - 5)
+    ));
+    assert_eq!(manager.arrangement.active(), Some(split));
+    assert!(state.busy.is_none());
+    assert!(!state.mouse(
+        &mut manager,
+        &layout,
+        &hovered_hits,
+        click(sidebar.right() - 2)
+    ));
+    assert!(matches!(state.modal, Some(Modal::Confirm(id, Control::Close)) if id == original));
+    assert_eq!(manager.arrangement.active(), Some(split));
+    key(&mut state, &mut manager, KeyCode::Esc);
 
     let split_process = witness(manager.session(split).unwrap());
     let divider = layout.vertical_divider.unwrap();

@@ -26,6 +26,7 @@
 - Refine the terminal toolbar and session navigator. Add adjustable splits, pane maximization, scrollback search, and visible text selection.
 - Render Terminal sidebar session names, shell status, and filter results on the sidebar background.
 - Remove the two-line session details footer from the Terminal sidebar.
+- Show a terminal icon, shell, and repository on each sidebar row, with split and close actions on hover.
 
 ### Tiếng Việt
 
@@ -51,3 +52,4 @@
 - Tinh chỉnh thanh công cụ và danh sách phiên. Bổ sung chỉnh tỷ lệ chia, phóng to pane, tìm trong đầu ra đã lưu và chọn văn bản đang hiển thị.
 - Hiển thị tên phiên, trạng thái shell và kết quả lọc trên nền bảng Phiên của Terminal.
 - Bỏ hai dòng chi tiết phiên ở đáy sidebar Terminal.
+- Hiển thị biểu tượng terminal, shell và repo trên mỗi dòng sidebar, kèm nút chia và đóng khi rê chuột.

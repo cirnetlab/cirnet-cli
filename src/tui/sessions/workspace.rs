@@ -397,7 +397,7 @@ impl Busy {
 
 pub(super) enum Placement {
     Active,
-    Split,
+    Split(SessionId),
     Replace(SessionId),
 }
 
@@ -505,7 +505,8 @@ impl State {
                         let id = manager.insert(session);
                         manager.arrangement.activate(id);
                     }
-                    Placement::Split => {
+                    Placement::Split(source) => {
+                        manager.arrangement.activate(source);
                         let id = manager.insert(session);
                         manager.arrangement.split(id);
                     }
@@ -580,7 +581,8 @@ impl State {
                 arrangement.activate(0);
                 0
             }
-            Placement::Split => {
+            Placement::Split(source) => {
+                arrangement.activate(*source);
                 arrangement.split(0);
                 0
             }
@@ -691,6 +693,28 @@ impl State {
         }
     }
 
+    pub(super) fn sidebar_action_enabled(&self, manager: &Manager, command: Command) -> bool {
+        self.busy.is_none()
+            && match command {
+                Command::Split => {
+                    !manager.arrangement.split_active()
+                        && manager.entries.len() < super::MAX_SESSIONS
+                }
+                Command::Close => true,
+                _ => false,
+            }
+    }
+
+    fn close_session(&mut self, manager: &mut Manager, id: SessionId) {
+        if let Some(session) = manager.session(id) {
+            if session.needs_close_confirmation() {
+                self.modal = Some(Modal::Confirm(id, Command::Close));
+            } else if let Some(closed) = manager.take(id) {
+                self.discard(closed);
+            }
+        }
+    }
+
     pub(super) fn command(&mut self, manager: &mut Manager, command: Command) -> bool {
         if !self.enabled(manager, command) {
             return false;
@@ -725,7 +749,7 @@ impl State {
             Command::Split | Command::Duplicate if self.capacity(manager) => {
                 if let Some(id) = id {
                     let place = if command == Command::Split {
-                        Placement::Split
+                        Placement::Split(id)
                     } else {
                         Placement::Active
                     };
@@ -766,13 +790,14 @@ impl State {
                     self.modal = Some(Modal::Rename(session.id, input));
                 }
             }
-            Command::Close | Command::Restart => {
-                if let Some(session) = manager.active() {
-                    if command == Command::Restart || session.needs_close_confirmation() {
-                        self.modal = Some(Modal::Confirm(session.id, command));
-                    } else if let Some(closed) = manager.take(session.id) {
-                        self.discard(closed);
-                    }
+            Command::Close => {
+                if let Some(id) = id {
+                    self.close_session(manager, id);
+                }
+            }
+            Command::Restart => {
+                if let Some(id) = id {
+                    self.modal = Some(Modal::Confirm(id, Command::Restart));
                 }
             }
             _ => {}
@@ -1105,11 +1130,11 @@ impl State {
         }
         if mouse.kind == Moved {
             self.sidebar_hover = match hit {
-                Some(Hit::Session(id)) => Some(id),
+                Some(Hit::Session(id) | Hit::SessionAction(id, _)) => Some(id),
                 _ => None,
             };
             self.hovered_command = match hit {
-                Some(Hit::Command(cmd)) => Some(cmd),
+                Some(Hit::Command(cmd) | Hit::SessionAction(_, cmd)) => Some(cmd),
                 _ => None,
             };
         }
@@ -1125,7 +1150,17 @@ impl State {
                 self.sidebar_selected = manager.arrangement.active();
                 return false;
             }
-            (Some(Hit::Session(id)), Down(Left | Right)) => {
+            (Some(Hit::SessionAction(id, command)), Down(Left)) => {
+                if manager.session(id).is_some() && self.sidebar_action_enabled(manager, command) {
+                    match command {
+                        Command::Split => self.start_existing(manager, Placement::Split(id), id),
+                        Command::Close => self.close_session(manager, id),
+                        _ => {}
+                    }
+                }
+                return false;
+            }
+            (Some(Hit::Session(id) | Hit::SessionAction(id, _)), Down(Left | Right)) => {
                 self.focus_session(manager, id);
                 if mouse.kind == Down(Right) {
                     self.open_menu(manager, Some((x, y.saturating_add(1))));
@@ -1142,6 +1177,8 @@ impl State {
         }
         if layout.sidebar.is_some_and(|area| area.contains(x, y)) {
             if matches!(mouse.kind, ScrollUp | ScrollDown) {
+                self.sidebar_hover = None;
+                self.hovered_command = None;
                 self.step_sidebar(manager, if mouse.kind == ScrollUp { -1 } else { 1 });
             }
             return false;

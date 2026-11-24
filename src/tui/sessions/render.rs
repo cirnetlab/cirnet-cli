@@ -16,6 +16,7 @@ use super::{
 pub(super) enum Hit {
     Command(Command),
     Session(SessionId),
+    SessionAction(SessionId, Command),
     PaneActions(SessionId),
     SidebarSearch,
     FindNext,
@@ -392,24 +393,29 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
         let id = session.id;
         let focused = Some(id) == selected && manager.arrangement.sidebar_focused;
         let running = session.running();
-        let marker = if Some(id) == active {
-            "›"
-        } else if manager.arrangement.panes.contains(&Some(id)) {
-            "·"
-        } else {
-            " "
-        };
-        let tone = if focused || Some(id) == active || state.sidebar_hover == Some(id) {
-            SELECTED
+        let hovered = state.sidebar_hover == Some(id);
+        let marker = if Some(id) == active { "▌" } else { " " };
+        let tone = if Some(id) == active {
+            Tone::Palette(PalettePart::SessionActive)
+        } else if hovered || focused {
+            Tone::Palette(PalettePart::SessionHover)
         } else {
             SURFACE
         };
-        let right = format!(
-            " {} {} ",
-            shell_label(&session.shell),
-            if running { "●" } else { "×" }
-        );
-        let left = format!(" {marker} {}", session.title());
+        let actions = hovered && area.width >= 16;
+        let right = if actions {
+            "      "
+        } else if running {
+            "  "
+        } else {
+            " ×"
+        };
+        let shell = if session.shell == "powershell" {
+            "pwsh"
+        } else {
+            &session.shell
+        };
+        let left = format!("{marker}▣ {shell} {}", session.title());
         let room = usize::from(area.width).saturating_sub(right.width());
         let left = ellipsize(&left, room);
         let line = format!(
@@ -418,6 +424,25 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
         );
         sidebar_line(frame, area, y, tone, &line);
         hits.row(area.x, y, area.width, Hit::Session(id));
+        if actions {
+            for (offset, command, icon) in [(6, Command::Split, " ◫ "), (3, Command::Close, " × ")]
+            {
+                let x = area.right() - offset;
+                let enabled = state.sidebar_action_enabled(manager, command);
+                let mut button = Line::default();
+                button.push(
+                    if enabled {
+                        tone
+                    } else {
+                        Tone::Palette(PalettePart::Detail)
+                    },
+                    icon,
+                );
+                overlay(frame, x, y, 3, &button);
+                // Disabled buttons still own their cells, so a click cannot select the row underneath.
+                hits.row(x, y, 3, Hit::SessionAction(id, command));
+            }
+        }
     }
 }
 
@@ -488,7 +513,23 @@ fn footer(frame: &mut Frame, manager: &Manager, state: &State) {
         write_span(footer, tone, &format!(" {note}"), frame.size.0);
         return;
     }
-    let hint = if let Some(command) = state.hovered_command {
+    let hint = if let Some(command) = state.hovered_command
+        && state.sidebar_hover.is_some()
+    {
+        match command {
+            Command::Split if manager.arrangement.split_active() => locale(
+                [
+                    " Split Terminal · two panes open",
+                    " Chia terminal · đang mở hai pane",
+                ],
+                vi,
+            ),
+            Command::Split => locale([" Split Terminal", " Chia terminal"], vi),
+            Command::Close => locale([" Kill Terminal", " Đóng terminal"], vi),
+            _ => "",
+        }
+        .into()
+    } else if let Some(command) = state.hovered_command {
         format!(
             " {} · {}",
             action_title(command, manager, vi),
@@ -706,8 +747,11 @@ fn dialogue(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State
             )),
             true,
         ),
-        Modal::Confirm(_, command) => (
-            command.title(vi).into(),
+        Modal::Confirm(id, command) => (
+            manager.session(*id).map_or_else(
+                || command.title(vi).into(),
+                |session| format!("{} · {}", command.title(vi), session.title()),
+            ),
             None,
             Vec::new(),
             0,

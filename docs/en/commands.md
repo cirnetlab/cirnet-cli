@@ -108,7 +108,7 @@ The dashboard shows the branch, Git status, local path and short commit hash. Op
 
 Press `:` to open the shared CNL command field. It uses the same history, completion and output controls as the main terminal. Press `T` to open the focused repository terminal.
 
-Use the integrated terminal toolbar or press F1 to open a terminal. The picker searches local repositories, prioritizes recent choices during the current CNL process, and offers installed shells. The Sessions panel shows one row per session. Press F4 to focus or hide it, then / to filter, ↑ or ↓ to navigate, and Enter to focus a session. F6 and F7 switch sessions immediately.
+Use the integrated terminal toolbar or press F1 to open a terminal. The picker searches local repositories, prioritizes recent choices during the current CNL process, and offers installed shells. The Sessions panel shows each shell and repository on one row. Hover a row for Split Terminal and Kill Terminal. Split is available with one pane open, and closing a running session asks for confirmation. Press F4 to focus or hide it, then / to filter, ↑ or ↓ to navigate, and Enter to focus a session. F6 and F7 switch sessions immediately.
 
 F3 splits or restores a single pane. Drag the divider or use Ctrl+Shift+Left and Ctrl+Shift+Right to change the first pane's share. Ctrl+Shift+P focuses the other pane and Ctrl+Shift+M maximizes or restores the current pane. The profile remembers sidebar visibility and split ratio.
 
