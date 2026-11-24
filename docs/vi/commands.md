@@ -110,7 +110,7 @@ Nhấn `:` để mở ô lệnh CNL dùng chung lịch sử, gợi ý và điề
 
 Dùng thanh công cụ hoặc nhấn F1 để mở terminal. Bộ chọn tìm trong các kho mã cục bộ, ưu tiên kho vừa dùng trong lần chạy CNL hiện tại và liệt kê các shell đã cài. Bảng Phiên hiển thị shell và repo trên cùng một dòng. Rê chuột lên dòng để hiện nút Chia terminal và Đóng terminal. Nút Chia dùng khi đang mở một pane. Đóng phiên đang chạy cần xác nhận. Nhấn F4 để lấy tiêu điểm hoặc ẩn bảng, / để lọc, ↑ hoặc ↓ để di chuyển và Enter để lấy tiêu điểm phiên. F6 và F7 chuyển phiên trực tiếp.
 
-F3 chia pane hoặc quay về một pane. Kéo vạch chia hoặc dùng Ctrl+Shift+Trái và Ctrl+Shift+Phải để đổi tỷ lệ pane đầu. Ctrl+Shift+P chuyển tiêu điểm sang pane còn lại, Ctrl+Shift+M phóng to hoặc khôi phục pane. Hồ sơ lưu chế độ hiển thị bảng Phiên và tỷ lệ chia.
+F3 chia pane hoặc quay về một pane. Bảng Phiên đặt hai pane trong cùng nhóm cạnh nhau và nối bằng ký tự cây. Chọn một dòng để lấy tiêu điểm pane tương ứng. Kéo vạch chia hoặc dùng Ctrl+Shift+Trái và Ctrl+Shift+Phải để đổi tỷ lệ pane đầu. Ctrl+Shift+P chuyển tiêu điểm sang pane còn lại, Ctrl+Shift+M phóng to hoặc khôi phục pane. Hồ sơ lưu chế độ hiển thị bảng Phiên và tỷ lệ chia.
 
 Nhấn F5, dùng nút trên tiêu đề pane hoặc bấm chuột phải vào phiên để mở **Thao tác**. Menu liệt kê thao tác khả dụng cùng phím tắt, gồm Đổi tên, Nhân bản, Di chuyển, Khởi động lại và Đóng. F10 quay về Trình quản lý repo và giữ các phiên đang mở. Nhân bản mở shell mới tại cùng thư mục ban đầu.
 

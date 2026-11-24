@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     env, io,
+    ops::Range,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -1283,11 +1284,15 @@ impl State {
     }
 
     pub(super) fn sidebar_ids(&self, manager: &Manager) -> Vec<SessionId> {
+        self.sidebar_rows(manager).0
+    }
+
+    pub(super) fn sidebar_rows(&self, manager: &Manager) -> (Vec<SessionId>, Option<Range<usize>>) {
         let query = self
             .sidebar_query
             .as_ref()
             .map(|query| query.value.to_lowercase());
-        manager
+        let mut ids: Vec<_> = manager
             .entries
             .iter()
             .filter(|s| {
@@ -1298,7 +1303,9 @@ impl State {
                 })
             })
             .map(|s| s.id)
-            .collect()
+            .collect();
+        let split = manager.arrangement.group_sidebar(&mut ids);
+        (ids, split)
     }
 
     fn step_sidebar(&mut self, manager: &Manager, step: isize) {

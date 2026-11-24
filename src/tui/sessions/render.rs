@@ -326,7 +326,7 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
         return;
     }
     let vi = state.vi;
-    let ids = state.sidebar_ids(manager);
+    let (ids, split) = state.sidebar_rows(manager);
     let active = manager.arrangement.active();
     let selected = state.sidebar_selected.or(active);
     let title = format!(
@@ -381,7 +381,8 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
             .max(active.saturating_add(1).saturating_sub(capacity));
     }
     for (offset, y) in (list_y..list_end).enumerate() {
-        let Some(session) = ids.get(start + offset).and_then(|id| manager.session(*id)) else {
+        let index = start + offset;
+        let Some(session) = ids.get(index).and_then(|id| manager.session(*id)) else {
             let text = if offset == 0 && ids.is_empty() {
                 locale([" No matching sessions", " Không có phiên phù hợp"], vi)
             } else {
@@ -415,7 +416,13 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
         } else {
             &session.shell
         };
-        let left = format!("{marker}>_ {shell} {}", session.title());
+        let tree = match split.as_ref().filter(|group| group.contains(&index)) {
+            Some(group) if index == group.start => "┌ ",
+            Some(group) if index + 1 == group.end => "└ ",
+            Some(_) => "├ ",
+            None => "",
+        };
+        let left = format!("{marker}{tree}>_ {shell} {}", session.title());
         let room = usize::from(area.width).saturating_sub(right.width());
         let left = ellipsize(&left, room);
         let line = format!(

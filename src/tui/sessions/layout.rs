@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use portable_pty::PtySize;
 
 use super::{SessionId, pty_size};
@@ -58,6 +60,22 @@ impl Arrangement {
 
     pub(super) fn split_active(&self) -> bool {
         self.panes.iter().all(Option::is_some)
+    }
+
+    pub(super) fn group_sidebar(&self, ids: &mut [SessionId]) -> Option<Range<usize>> {
+        let [Some(first), Some(second)] = self.panes else {
+            return None;
+        };
+        let first = ids.iter().position(|id| *id == first)?;
+        let second = ids.iter().position(|id| *id == second)?;
+        let start = first.min(second);
+        let end = first.max(second);
+        // Keep the split at its earliest list position and the standalone order intact.
+        ids[start..=end].rotate_right(1);
+        if first < second {
+            ids.swap(start, start + 1);
+        }
+        Some(start..start + 2)
     }
 
     pub(super) fn split_ratio(&self) -> u16 {
@@ -324,6 +342,41 @@ mod tests {
         arrangement.activate(1);
         arrangement.split(2);
         arrangement
+    }
+
+    #[test]
+    fn sidebar_groups_only_pane_members_and_preserves_standalone_order() {
+        let mut arrangement = split();
+        let order = [8, 1, 9, 10, 2, 11];
+        let mut ids = order;
+        assert_eq!(arrangement.group_sidebar(&mut ids), Some(1..3));
+        assert_eq!(ids, [8, 1, 2, 9, 10, 11]);
+
+        arrangement.move_pane();
+        let mut ids = order;
+        assert_eq!(arrangement.group_sidebar(&mut ids), Some(1..3));
+        assert_eq!(ids, [8, 2, 1, 9, 10, 11]);
+
+        let mut filtered = [8, 2, 11];
+        assert_eq!(arrangement.group_sidebar(&mut filtered), None);
+        assert_eq!(filtered, [8, 2, 11]);
+    }
+
+    #[test]
+    fn unsplit_and_close_remove_sidebar_grouping_without_reordering_remaining_sessions() {
+        let mut arrangement = split();
+        let mut ids = [1, 3, 2];
+        arrangement.unsplit();
+        assert_eq!(arrangement.group_sidebar(&mut ids), None);
+        assert_eq!(ids, [1, 3, 2]);
+
+        arrangement.activate(1);
+        arrangement.split(2);
+        arrangement.close(2, None);
+        let mut ids = [1, 3];
+        assert_eq!(arrangement.group_sidebar(&mut ids), None);
+        assert_eq!(ids, [1, 3]);
+        assert_eq!(arrangement.active(), Some(1));
     }
 
     #[test]

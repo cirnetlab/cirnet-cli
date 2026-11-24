@@ -110,7 +110,7 @@ Press `:` to open the shared CNL command field. It uses the same history, comple
 
 Use the integrated terminal toolbar or press F1 to open a terminal. The picker searches local repositories, prioritizes recent choices during the current CNL process, and offers installed shells. The Sessions panel shows each shell and repository on one row. Hover a row for Split Terminal and Kill Terminal. Split is available with one pane open, and closing a running session asks for confirmation. Press F4 to focus or hide it, then / to filter, ↑ or ↓ to navigate, and Enter to focus a session. F6 and F7 switch sessions immediately.
 
-F3 splits or restores a single pane. Drag the divider or use Ctrl+Shift+Left and Ctrl+Shift+Right to change the first pane's share. Ctrl+Shift+P focuses the other pane and Ctrl+Shift+M maximizes or restores the current pane. The profile remembers sidebar visibility and split ratio.
+F3 splits or restores a single pane. The Sessions panel shows both split panes together with tree connectors. Select either row to focus its pane. Drag the divider or use Ctrl+Shift+Left and Ctrl+Shift+Right to change the first pane's share. Ctrl+Shift+P focuses the other pane and Ctrl+Shift+M maximizes or restores the current pane. The profile remembers sidebar visibility and split ratio.
 
 Open **Actions** with F5, from a pane header, or by right-clicking a session. The menu lists available operations and shortcuts, including Rename, Duplicate, Move, Restart, and Close. F10 returns to Repository Manager with the sessions still open. Duplicate starts a fresh shell in the same initial directory.
 

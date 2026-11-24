@@ -541,10 +541,10 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
         Some(render::Hit::Session(split))
     );
     // Hit regions can exist even when the sidebar rows are blank.
-    for row_index in [sidebar.y + 1, sidebar.y + 2] {
+    for (row_index, connector) in [(sidebar.y + 1, "┌"), (sidebar.y + 2, "└")] {
         let row = frame.rows[usize::from(row_index)].contents();
         assert!(
-            row.contains(">_ cmd fixture-two"),
+            row.contains(&format!("{connector} >_ cmd fixture-two")),
             "sidebar session row is missing: {row:?}"
         );
     }
@@ -722,8 +722,8 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
         &hits,
         MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: first.body.x + 2,
-            row: first.body.y + 1,
+            column: sidebar.x + 2,
+            row: sidebar.y + 1,
             modifiers: KeyModifiers::NONE,
         },
     ));
@@ -847,6 +847,9 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
     key(&mut state, &mut manager, KeyCode::Enter);
     finish_job(&mut state, &mut manager, &receiver);
     assert!(manager.session(duplicate).is_none());
+    let (remaining, group) = state.sidebar_rows(&manager);
+    assert_eq!(remaining, [split, original]);
+    assert!(group.is_none());
     assert_eq!(process_state(&duplicate_process, 2000), WAIT_OBJECT_0);
     assert_eq!(process_state(&original_process, 0), WAIT_TIMEOUT);
 

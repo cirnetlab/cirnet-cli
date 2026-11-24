@@ -278,7 +278,7 @@ impl Style {
             ContextItem => (depth.color((232, 233, 236), 254, White), Some(suggestions)),
             SessionActive => (
                 depth.color((255, 224, 199), 223, White),
-                Some(depth.color((66, 48, 41), 237, DarkGrey)),
+                Some(depth.color((78, 57, 46), 238, DarkGrey)),
             ),
             SessionHover => (
                 depth.color((242, 242, 243), 255, White),

@@ -28,6 +28,7 @@
 - Remove the two-line session details footer from the Terminal sidebar.
 - Show a terminal icon, shell, and repository on each sidebar row, with split and close actions on hover.
 - Use a shell prompt and two pane outlines for the terminal icons.
+- Group split terminal panes in the sidebar and show their relationship with tree connectors.
 
 ### Tiếng Việt
 
@@ -55,3 +56,4 @@
 - Bỏ hai dòng chi tiết phiên ở đáy sidebar Terminal.
 - Hiển thị biểu tượng terminal, shell và repo trên mỗi dòng sidebar, kèm nút chia và đóng khi rê chuột.
 - Dùng biểu tượng dấu nhắc cho shell và hai khung cho thao tác chia pane.
+- Gom các pane thuộc cùng một split trong sidebar Terminal và dùng ký tự cây để thể hiện quan hệ giữa chúng.
