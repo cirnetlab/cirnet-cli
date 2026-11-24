@@ -155,7 +155,7 @@ fn terminal_shows_back_in_footer_and_omits_scroll_hints() {
     };
     let flags = crate::cli::app().get_matches_from(["cnl"]);
     let manager = Manager::default();
-    for width in [64, 125] {
+    for width in [44, 45, 75, 76, 125] {
         let size = (width, 24);
         let (events, _receiver) = std::sync::mpsc::sync_channel(1);
         let state = State::new(
@@ -169,7 +169,8 @@ fn terminal_shows_back_in_footer_and_omits_scroll_hints() {
         let toolbar = frame.rows[0].contents();
         let footer = frame.rows.last().unwrap().contents();
 
-        assert!(toolbar.contains("Actions"));
+        assert_eq!(toolbar.chars().filter(|&cell| cell == '◫').count(), 1);
+        assert_eq!(toolbar.contains("Actions"), width >= 45);
         assert!(!toolbar.contains("F5"));
         assert!(!toolbar.contains("F10"));
         assert!(footer.contains("F10 Back"));
@@ -544,7 +545,7 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
     assert!(!state.mouse(&mut manager, &launch_layout, &launch_hits, launch_hover));
     let (launch_frame, launch_hits) = render::frame(&manager, &launch_layout, &state);
     let row = launch_frame.rows[usize::from(launch_hover.row)].contents();
-    assert!(row.ends_with("▯▯  × "), "{row:?}");
+    assert!(row.ends_with(" ◫  × "), "{row:?}");
     assert!(!state.mouse(
         &mut manager,
         &launch_layout,
@@ -595,7 +596,7 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
     for (row_index, connector) in [(sidebar.y + 1, "┌"), (sidebar.y + 2, "└")] {
         let row = frame.rows[usize::from(row_index)].contents();
         assert!(
-            row.contains(&format!("{connector} >_ cmd fixture-two")),
+            row.contains(&format!("{connector} ›_ cmd fixture-two")),
             "sidebar session row is missing: {row:?}"
         );
     }
@@ -894,17 +895,63 @@ fn conpty_workspace_operations_preserve_live_panes_and_close_only_owned_shell() 
     assert!(
         solo_frame.rows[usize::from(side.y + 1)]
             .contents()
-            .contains("┌ >_ cmd fixture-two")
+            .contains("┌ ›_ cmd fixture-two")
     );
     assert!(
         solo_frame.rows[usize::from(side.y + 2)]
             .contents()
-            .contains("└ >_ cmd Kiểm tra 界")
+            .contains("└ ›_ cmd Kiểm tra 界")
     );
     assert_eq!(
         solo_hits.at(side.x, side.y + 2),
         Some(render::Hit::Session(original))
     );
+    for width in [88, 124, 160] {
+        let resized = (width, size.1);
+        state.size = resized;
+        let layout = Layout::new(resized, &manager.arrangement);
+        let sidebar = layout.sidebar.unwrap();
+        let y = sidebar.y + 3;
+        let (frame, hits) = render::frame(&manager, &layout, &state);
+        let row = frame.rows[usize::from(y)].contents();
+        let icon_column = |row: &str| {
+            row.find("_ ")
+                .map(|byte| unicode_width::UnicodeWidthStr::width(&row[..byte]))
+        };
+        for member_y in [sidebar.y + 1, sidebar.y + 2] {
+            assert_eq!(
+                icon_column(frame.rows[usize::from(member_y)].contents()),
+                icon_column(row),
+                "terminal icons must align at window width {width}"
+            );
+        }
+        assert_eq!(icon_column(row), Some(usize::from(sidebar.x + 4)));
+        assert!(!state.mouse(
+            &mut manager,
+            &layout,
+            &hits,
+            MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: sidebar.x + 3,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            }
+        ));
+        let (frame, hits) = render::frame(&manager, &layout, &state);
+        let hovered = frame.rows[usize::from(y)].contents();
+        assert_eq!(icon_column(hovered), icon_column(row));
+        assert!(hovered.ends_with(" ◫  × "), "{hovered:?}");
+        assert_eq!(
+            hits.at(sidebar.right() - 5, y),
+            Some(render::Hit::SessionAction(standalone, Control::Split))
+        );
+        assert_eq!(
+            hits.at(sidebar.right() - 2, y),
+            Some(render::Hit::SessionAction(standalone, Control::Close))
+        );
+    }
+    state.size = size;
+    state.sidebar_hover = None;
     let click = |row| MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: side.x + 2,

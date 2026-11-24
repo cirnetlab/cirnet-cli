@@ -54,6 +54,8 @@ impl Hits {
 const SURFACE: Tone = Tone::Palette(PalettePart::ContextItem);
 const SELECTED: Tone = Tone::Palette(PalettePart::ContextSelected);
 const BORDER: Tone = Tone::Palette(PalettePart::ContextEdge);
+const TERMINAL_ICON: &str = "›_";
+const SPLIT_ICON: &str = "◫";
 
 pub(super) fn frame(manager: &Manager, layout: &Layout, state: &State) -> (Frame, Hits) {
     let mut frame = Frame::new(state.size);
@@ -148,7 +150,7 @@ fn toolbar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State)
     ];
     let compact = width < 45;
     let labels = if compact {
-        ["+", "▯▯", "≡", "⋯"]
+        ["+", SPLIT_ICON, "≡", "⋯"]
     } else if width >= 76 {
         controls.map(|cmd| action_title(cmd, manager, vi))
     } else {
@@ -172,7 +174,11 @@ fn toolbar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State)
     // );
     // write_span(row, Tone::Accent, &ellipsize(&caption, end as usize), end);
     for (command, label) in controls.into_iter().zip(labels) {
-        let text = format!(" {label} ");
+        let text = if command == Command::Split && !compact {
+            format!(" {SPLIT_ICON} {label} ")
+        } else {
+            format!(" {label} ")
+        };
         let start = row_width(row);
         let button_width = text.width() as u16;
         if start + 1 + button_width > width {
@@ -420,11 +426,16 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
             Some(group) if index == group.start => "┌ ",
             Some(group) if index + 1 == group.end => "└ ",
             Some(_) => "├ ",
-            None => "",
+            None => "  ",
         };
-        let left = format!("{marker}{tree}>_ {shell} {}", session.title());
+        let prefix = format!("{marker}{tree}{TERMINAL_ICON} ");
         let room = usize::from(area.width).saturating_sub(right.width());
-        let left = ellipsize(&left, room);
+        let left = if room >= prefix.width() {
+            let label = format!("{shell} {}", session.title());
+            format!("{prefix}{}", ellipsize(&label, room - prefix.width()))
+        } else {
+            marker.into()
+        };
         let line = format!(
             "{left}{}{right}",
             " ".repeat(room.saturating_sub(left.width()))
@@ -432,7 +443,8 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
         sidebar_line(frame, area, y, tone, &line);
         hits.row(area.x, y, area.width, Hit::Session(id));
         if actions {
-            for (offset, command, icon) in [(6, Command::Split, "▯▯ "), (3, Command::Close, " × ")]
+            for (offset, command, icon) in
+                [(6, Command::Split, SPLIT_ICON), (3, Command::Close, "×")]
             {
                 let x = area.right() - offset;
                 let enabled = state.sidebar_action_enabled(manager, id, command);
@@ -443,7 +455,7 @@ fn sidebar(frame: &mut Frame, hits: &mut Hits, manager: &Manager, area: Rect, st
                     } else {
                         Tone::Palette(PalettePart::Detail)
                     },
-                    icon,
+                    format!(" {icon} "),
                 );
                 overlay(frame, x, y, 3, &button);
                 // Disabled buttons still own their cells, so a click cannot select the row underneath.
