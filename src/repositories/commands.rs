@@ -68,7 +68,7 @@ pub(crate) fn command() -> Command {
         sync("fetch", true),
         sync("update", false),
         read("switch"),
-        read("terminal").arg(option("shell").value_parser(crate::cli::native::SHELLS)),
+        read("terminal").arg(option("shell").value_parser(crate::cli::native::shell_parser())),
         read("diff").arg(flag("staged")),
         read("log"),
         read("branches"),
@@ -104,7 +104,7 @@ pub(crate) fn command() -> Command {
             option("remote"),
             option("preferred-branch"),
             option("path").value_parser(value_parser!(PathBuf)),
-            option("shell").value_parser(crate::cli::native::SHELLS),
+            option("shell").value_parser(crate::cli::native::shell_parser()),
         ]),
         Command::new("group")
             .subcommand_required(true)

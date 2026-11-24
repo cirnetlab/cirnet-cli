@@ -125,7 +125,7 @@ impl Registry {
                 && entry
                     .shell
                     .as_deref()
-                    .is_none_or(|shell| crate::cli::native::SHELLS.contains(&shell))
+                    .is_none_or(crate::cli::native::valid_shell)
                 && entry.groups.is_subset(&self.groups);
             ensure!(valid, "{}", msg::get(msg::REGISTRY_INVALID));
         }

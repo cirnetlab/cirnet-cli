@@ -299,6 +299,8 @@ fn shell_label(shell: &str) -> &str {
         "cmd" => "CMD",
         "bash" => "Bash",
         "wsl" => "WSL",
+        "git-bash" => "Git Bash",
+        selector if selector.starts_with("wsl:") => "WSL Bash",
         _ => shell,
     }
 }
@@ -728,7 +730,7 @@ fn dialogue(frame: &mut Frame, hits: &mut Hits, manager: &Manager, state: &State
                 .shells
                 .iter()
                 .enumerate()
-                .map(|(index, shell)| OptionRow::choice(index, (*shell).to_owned()))
+                .map(|(index, shell)| OptionRow::choice(index, shell.label(vi)))
                 .collect();
             let note = options.is_empty().then(|| {
                 locale(

@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    env, io,
+    io,
     ops::Range,
     path::{Path, PathBuf},
     sync::{
@@ -16,6 +16,8 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
+
+use crate::cli::native::{self, ShellProfile};
 
 use super::{
     super::{
@@ -52,7 +54,7 @@ pub(super) struct Catalog {
     root: PathBuf,
     flags: ArgMatches,
     choices: Option<Vec<Choice>>,
-    pub(super) shells: Vec<&'static str>,
+    pub(super) shells: Vec<ShellProfile>,
 }
 
 impl Catalog {
@@ -125,45 +127,13 @@ impl Catalog {
         choice
             .preferred
             .as_deref()
-            .and_then(|shell| self.shells.iter().position(|available| *available == shell))
+            .and_then(|shell| {
+                self.shells
+                    .iter()
+                    .position(|available| available.matches(shell))
+            })
             .unwrap_or_default()
     }
-}
-
-fn installed_shells() -> Vec<&'static str> {
-    let mut paths: Vec<_> = env::var_os("PATH")
-        .as_ref()
-        .map(|paths| env::split_paths(paths).collect())
-        .unwrap_or_default();
-    if cfg!(windows)
-        && let Some(root) = env::var_os("SystemRoot")
-    {
-        paths.push(PathBuf::from(root).join("System32"));
-    }
-    crate::cli::native::SHELLS
-        .into_iter()
-        .filter_map(|name| {
-            let command = crate::cli::native::shell(Some(name)).ok()?;
-            paths
-                .iter()
-                .any(|path| executable(&path.join(command.get_program())))
-                .then_some(name)
-        })
-        .collect()
-}
-
-fn executable(path: &Path) -> bool {
-    let Ok(metadata) = path.metadata() else {
-        return false;
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return false;
-        }
-    }
-    metadata.is_file()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -403,7 +373,7 @@ pub(super) enum Placement {
 }
 
 pub(super) enum Completed {
-    Picker(Vec<Choice>, Vec<&'static str>),
+    Picker(Vec<Choice>, Vec<ShellProfile>),
     Session(Box<Session>, Placement),
     Closed,
 }
@@ -571,7 +541,7 @@ impl State {
                     choice.name.to_lowercase(),
                 )
             });
-            Ok(Completed::Picker(choices, installed_shells()))
+            Ok(Completed::Picker(choices, native::installed_shells()))
         });
     }
 
@@ -626,7 +596,7 @@ impl State {
         });
     }
 
-    fn start_choice(&mut self, manager: &Manager, choice: Choice, shell: &'static str) {
+    fn start_choice(&mut self, manager: &Manager, choice: Choice, shell: String) {
         if !self.capacity(manager) {
             return;
         }
@@ -649,7 +619,7 @@ impl State {
                     vi
                 )
             );
-            let mut session = Session::start(&key, &cwd, Some(shell), size, vi)?;
+            let mut session = Session::start(&key, &cwd, Some(&shell), size, vi)?;
             session.repository = choice.name;
             Ok(Completed::Session(
                 Box::new(session),
@@ -954,8 +924,8 @@ impl State {
                 query,
                 previous,
             }) => {
-                if let Some(&shell) = self.catalog.shells.get(index.unwrap_or(selected)) {
-                    self.start_choice(manager, repository, shell);
+                if let Some(shell) = self.catalog.shells.get(index.unwrap_or(selected)) {
+                    self.start_choice(manager, repository, shell.selector.clone());
                 } else {
                     self.modal = Some(Modal::Shells {
                         repository,

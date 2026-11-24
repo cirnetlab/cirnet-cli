@@ -28,7 +28,12 @@ use self::{
     workspace::{Catalog, WorkspaceEvent},
 };
 use super::terminal::{Line, Screen, Tone};
-use crate::{localization::text as locale, repositories::Row, workspace::Workspace};
+use crate::{
+    cli::native::{self, ShellProfile},
+    localization::text as locale,
+    repositories::Row,
+    workspace::Workspace,
+};
 
 const MAX_SESSIONS: usize = 12;
 const SCROLLBACK_ROWS: usize = 500;
@@ -131,9 +136,19 @@ impl Manager {
         size: PtySize,
         vi: bool,
     ) -> Result<usize> {
+        let default_wsl = if shell == Some("wsl") {
+            Some(native::terminal_profile(shell, vi)?)
+        } else {
+            None
+        };
+        let shell = default_wsl
+            .as_ref()
+            .map(|profile| profile.selector.as_str())
+            .or(shell);
         // Once open, shell changes happen in a new independent session.
         if let Some(index) = self.entries.iter().position(|session| {
-            session.cwd == cwd && shell.is_none_or(|shell| session.shell == shell)
+            session.cwd == cwd
+                && shell.is_none_or(|shell| native::same_selector(&session.shell, shell))
         }) {
             return Ok(index);
         }
@@ -144,7 +159,10 @@ impl Manager {
         let size = Layout::new((size.cols, size.rows), &arrangement)
             .pane(self.next_id + 1)
             .map_or(size, |pane| pane.size());
-        let session = Session::start(key, cwd, shell, size, vi)?;
+        let session = match default_wsl {
+            Some(profile) => Session::start_profile(key, cwd, profile, size, vi)?,
+            None => Session::start(key, cwd, shell, size, vi)?,
+        };
         self.insert(session);
         Ok(index)
     }
@@ -301,22 +319,32 @@ impl Session {
         size: PtySize,
         vi: bool,
     ) -> Result<Self> {
-        let default_shell = if cfg!(windows) { "powershell" } else { "bash" };
-        let mut shell = requested.unwrap_or(default_shell);
-        let backend = match Backend::start(shell, cwd, size, vi) {
-            Err(powershell) if cfg!(windows) && requested.is_none() => {
-                shell = "cmd";
-                Backend::start(shell, cwd, size, vi).with_context(|| powershell.to_string())?
+        let profile = native::terminal_profile(requested, vi)?;
+        let result = Self::start_profile(key, cwd, profile, size, vi);
+        match result {
+            Err(error) if cfg!(windows) && requested.is_none() => {
+                let profile = native::terminal_profile(Some("cmd"), vi)?;
+                Self::start_profile(key, cwd, profile, size, vi).with_context(|| error.to_string())
             }
-            result => result?,
-        };
+            result => result,
+        }
+    }
+
+    fn start_profile(
+        key: &str,
+        cwd: &Path,
+        profile: ShellProfile,
+        size: PtySize,
+        vi: bool,
+    ) -> Result<Self> {
+        let backend = Backend::start(&profile, cwd, size, vi)?;
         Ok(Self {
             id: 0,
             key: key.into(),
             cwd: cwd.into(),
             repository: repository_name(key, cwd),
             label: None,
-            shell: shell.into(),
+            shell: profile.selector,
             size,
             output: Arc::clone(&backend.output),
             backend,

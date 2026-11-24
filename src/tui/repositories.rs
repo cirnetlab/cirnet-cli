@@ -979,7 +979,10 @@ fn drive(
                 Effect::Exit => break 'dashboard,
                 Effect::CommandPrompt => {
                     let (selectors, focused) = dashboard.command_context(workspace);
-                    prompt.open_on(selectors, focused);
+                    let native = dashboard
+                        .focused()
+                        .and_then(|row| row.path.clone().map(|path| (path, row.shell.clone())));
+                    prompt.open_on(selectors, focused, native);
                     redraw = true;
                 }
                 Effect::Cancel => {

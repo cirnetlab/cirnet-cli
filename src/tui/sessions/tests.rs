@@ -115,6 +115,24 @@ fn interactive_shells_keep_working_directories_and_environment_isolated() {
     output_contains(session, "RESULT:[session_a]");
 }
 
+#[test]
+fn bash_pty_completes_a_spaced_filename_with_readline() {
+    let shell = if cfg!(windows) { "git-bash" } else { "bash" };
+    if native::bash_executable(cfg!(windows)).is_none() {
+        return;
+    }
+    let repos = Repos::new();
+    let cwd = fs::canonicalize(repos.0.join("fixture-one")).unwrap();
+    fs::write(cwd.join("completion-fixture example.txt"), "cnl").unwrap();
+    let session = Session::start("fixture", &cwd, Some(shell), pty_size((140, 24)), false).unwrap();
+    assert!(session.send(b"printf 'CNL_HISTORY=<%s>\n' \"${HISTFILE-unset}\"\r".to_vec()));
+    output_contains(&session, "CNL_HISTORY=<unset>");
+    assert!(session.send(b"printf 'CNL_TAB_RESULT=<%s>\n' completion-fixt".to_vec()));
+    assert!(session.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    assert!(session.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    output_contains(&session, "CNL_TAB_RESULT=<completion-fixture example.txt>");
+}
+
 #[cfg(windows)]
 #[test]
 fn powershell_opens_in_the_checkout_with_a_standard_windows_prompt() {
@@ -190,6 +208,10 @@ fn terminal_keys_keep_native_interrupts_and_cursor_modes() {
     let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
     assert_eq!(key_bytes(up, false).unwrap(), b"\x1b[A");
     assert_eq!(key_bytes(up, true).unwrap(), b"\x1bOA");
+    let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(key_bytes(tab, false).unwrap(), b"\t");
+    let back_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert_eq!(key_bytes(back_tab, false).unwrap(), b"\x1b[Z");
     let vietnamese = KeyEvent::new(KeyCode::Char('ộ'), KeyModifiers::NONE);
     assert_eq!(key_bytes(vietnamese, false).unwrap(), "ộ".as_bytes());
 }

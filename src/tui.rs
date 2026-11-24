@@ -42,7 +42,7 @@ use crate::localization::{self, terminal as labels};
 
 const COMMAND_LIMIT: usize = 8192;
 const SEARCH_LIMIT: usize = 256;
-const SUGGESTION_LIMIT: usize = 7;
+const SUGGESTION_LIMIT: usize = completion::LIMIT;
 use labels::{COMMAND_TOO_LONG, INPUT_RECEIVED as PASTE_NEWLINE_NOTICE};
 
 fn text_modifiers(key: KeyEvent) -> bool {
@@ -357,6 +357,7 @@ impl Menu {
 
     fn close_main_prompt(&mut self) -> bool {
         let closed = self.prompt.take().is_some();
+        self.completer.reset_request();
         self.history.reset_navigation();
         closed
     }
@@ -429,6 +430,7 @@ impl Menu {
             .as_ref()
             .map_or(&prompt.input, |(_, base)| base);
         prompt.completions = if input.value.is_empty() {
+            self.completer.reset_request();
             self.output
                 .is_none()
                 .then(|| self.items.get(self.selected))
@@ -614,18 +616,7 @@ impl Menu {
         if prompt.input.value.trim().is_empty() || prompt.error == Some(COMMAND_TOO_LONG) {
             return Effect::Idle;
         }
-        let first = prompt
-            .input
-            .value
-            .split_whitespace()
-            .next()
-            .unwrap_or_default();
-        if first != "cnl"
-            && first != "cnl.exe"
-            && first != "clear"
-            && !first.starts_with('-')
-            && completion::grammar().find_subcommand(first).is_none()
-        {
+        if !self.completer.is_cnl_input(&prompt.input.value) {
             if self.output.as_ref().is_some_and(|output| output.running) {
                 prompt.error = Some(labels::RUN_IN_PROGRESS);
                 return Effect::Redraw;
@@ -1026,6 +1017,7 @@ fn show(
     let mut sessions = sessions::Manager::default();
     let (mut context, values) = repository_state(workspace, flags);
     menu.completer.set_repository_values(values);
+    set_completion_context(menu, &context);
     let mut refresh: Option<std::sync::mpsc::Receiver<RepositoryState>> = None;
     let mut refresh_after_run = false;
     let mut screen = Screen::enter(io::BufWriter::with_capacity(64 * 1024, io::stdout().lock()))?;
@@ -1046,6 +1038,7 @@ fn show(
                 Ok((updated, values)) => {
                     context = updated;
                     menu.completer.set_repository_values(values);
+                    set_completion_context(menu, &context);
                     menu.refresh_completion_labels();
                     refresh = None;
                     redraw = true;
@@ -1201,6 +1194,7 @@ fn show(
                                     &line,
                                     menu.vi,
                                     active.as_ref().map(|(path, _)| path.as_path()),
+                                    active.as_ref().and_then(|(_, shell)| shell.as_deref()),
                                 )
                             })
                     };
@@ -1229,6 +1223,7 @@ fn show(
                                 crate::cli::native::interactive_in(
                                     shell.as_deref().or(preferred),
                                     path,
+                                    menu.vi,
                                 )
                             })
                             .map(|status| runner::RunOutput {
@@ -1323,6 +1318,14 @@ fn show(
 }
 
 type RepositoryState = (Result<management::ActiveContext, String>, Vec<String>);
+
+fn set_completion_context(menu: &mut Menu, context: &Result<management::ActiveContext, String>) {
+    let active = context.as_ref().ok().and_then(Option::as_ref);
+    menu.completer.set_native_context(
+        active.map(|(path, _)| path.as_path()),
+        active.and_then(|(_, shell)| shell.as_deref()),
+    );
+}
 
 fn repository_state(workspace: &Workspace, flags: &ArgMatches) -> RepositoryState {
     (

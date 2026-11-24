@@ -1,7 +1,7 @@
 use std::cell::Cell;
 #[cfg(windows)]
 use std::io;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 
 use crate::localization::{self, Diagnostic, START_FAILED, message, text};
 use anyhow::{Context, Result, bail};
@@ -209,6 +209,170 @@ pub fn hidden(command: &mut Command) {
     let _ = command;
 }
 
+/// Capture fixed metadata queries with a shared process, byte, and time budget.
+/// The caller chooses trusted executables and supplies an argv that only reads data.
+pub(crate) fn metadata_output(
+    command: &mut Command,
+    timeout: std::time::Duration,
+    limit: usize,
+) -> Option<(ExitStatus, Vec<u8>)> {
+    use std::{
+        io::Read,
+        sync::{Arc, Condvar, Mutex},
+        thread,
+        time::{Duration, Instant},
+    };
+    const MAX_PROCESSES: usize = 4;
+    static READERS: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+    struct Permit;
+    impl Drop for Permit {
+        fn drop(&mut self) {
+            *READERS.0.lock().expect("metadata process count") -= 1;
+            READERS.1.notify_one();
+        }
+    }
+
+    let deadline = Instant::now() + timeout;
+    let (mut active, _) = READERS
+        .1
+        .wait_timeout_while(READERS.0.lock().ok()?, timeout, |active| {
+            *active >= MAX_PROCESSES
+        })
+        .ok()?;
+    if *active >= MAX_PROCESSES || Instant::now() >= deadline {
+        return None;
+    }
+    *active += 1;
+    drop(active);
+    let permit = Arc::new(Permit);
+    let reader_permit = Arc::clone(&permit);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    hidden(
+        command
+            .env_remove("CNL_TUI_REPORT")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .stdout(Stdio::piped()),
+    );
+    let mut child = command.spawn().ok()?;
+    let job = ProcessJob::attach(&child).ok();
+    let mut pipe = child.stdout.take().expect("piped metadata stdout");
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let reader = thread::Builder::new()
+        .name("cnl-metadata-output".into())
+        .spawn(move || {
+            let _permit = reader_permit;
+            let mut output = Vec::new();
+            let result = pipe
+                .by_ref()
+                .take(limit.saturating_add(1) as u64)
+                .read_to_end(&mut output);
+            let _ = sender.send(
+                result
+                    .ok()
+                    .filter(|_| output.len() <= limit)
+                    .map(|_| output),
+            );
+        });
+
+    let result = if reader.is_ok() {
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                _ => break None,
+            }
+        }
+    } else {
+        None
+    };
+    drop(job);
+    let Some(status) = result else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    let output = receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()??;
+    Some((status, output))
+}
+
+#[cfg(windows)]
+pub(crate) struct ProcessJob {
+    _handle: std::os::windows::io::OwnedHandle,
+}
+
+#[cfg(windows)]
+impl ProcessJob {
+    pub(crate) fn attach(child: &Child) -> Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        Self::attach_handle(child.as_raw_handle())
+    }
+
+    pub(crate) fn attach_handle(child: std::os::windows::io::RawHandle) -> Result<Self> {
+        use std::{mem, os::windows::io::FromRawHandle, ptr};
+        use windows_sys::Win32::System::JobObjects::*;
+        let handle = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        // The newly created job handle was checked for null and has a single owner.
+        let guard = Self {
+            _handle: unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle) },
+        };
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                mem::size_of_val(&limits) as u32,
+            )
+        } == 0
+            || unsafe { AssignProcessToJobObject(handle, child) } == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(guard)
+    }
+}
+
+#[cfg(unix)]
+pub(crate) struct ProcessJob(libc::pid_t);
+
+#[cfg(unix)]
+impl ProcessJob {
+    pub(crate) fn attach(child: &Child) -> Result<Self> {
+        Ok(Self(child.id().try_into()?))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessJob {
+    fn drop(&mut self) {
+        // Cancellable children were started as leaders of their own process groups.
+        unsafe { libc::kill(-self.0, libc::SIGKILL) };
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) struct ProcessJob;
+#[cfg(not(any(unix, windows)))]
+impl ProcessJob {
+    pub(crate) fn attach(_: &Child) -> Result<Self> {
+        bail!(
+            "{}",
+            crate::localization::message(crate::localization::terminal::CANCELLATION_WINDOWS_ONLY)
+        )
+    }
+}
+
 pub fn isolate_stdio() -> Result<()> {
     #[cfg(windows)]
     {
@@ -258,6 +422,45 @@ mod tests {
             ])
             .env("CNL_PROCESS_OUTPUT_FIXTURE", "child"))
         .unwrap();
+    }
+
+    #[test]
+    fn bounded_metadata_fixture() {
+        match std::env::var("CNL_BOUNDED_METADATA_FIXTURE").as_deref() {
+            Ok("overflow") => println!("{}", "a".repeat(16 * 1024)),
+            Ok("timeout") => std::thread::sleep(std::time::Duration::from_secs(5)),
+            Ok("nonzero") => {
+                println!("metadata");
+                std::process::exit(17);
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn metadata_preserves_status_and_enforces_byte_and_time_limits() {
+        use std::time::{Duration, Instant};
+        let fixture = |mode| {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "process::tests::bounded_metadata_fixture",
+                    "--nocapture",
+                ])
+                .env("CNL_BOUNDED_METADATA_FIXTURE", mode);
+            command
+        };
+        let timeout = Duration::from_secs(3);
+        let (status, output) = metadata_output(&mut fixture("nonzero"), timeout, 1024).unwrap();
+        assert_eq!(status.code(), Some(17));
+        assert!(String::from_utf8_lossy(&output).contains("metadata"));
+        assert!(metadata_output(&mut fixture("overflow"), timeout, 1024).is_none());
+        let start = Instant::now();
+        assert!(
+            metadata_output(&mut fixture("timeout"), Duration::from_millis(150), 1024).is_none()
+        );
+        assert!(start.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

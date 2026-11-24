@@ -31,6 +31,8 @@
 - Group split terminal panes in the sidebar and show their relationship with tree connectors.
 - Align sidebar terminal icons and show the Split icon when hovering over a session. The toolbar uses text labels for Split and Unsplit.
 - Preserve split terminal groups when opening or selecting an independent session.
+- Detect native Bash, Git Bash and selectable WSL Bash profiles while preserving native terminal completion.
+- Use checkout and shell context in the CNL palette with bounded local Git, PowerShell, CMD, Bash and WSL metadata.
 
 ### Tiếng Việt
 
@@ -61,3 +63,5 @@
 - Gom các pane thuộc cùng một split trong sidebar Terminal và dùng ký tự cây để thể hiện quan hệ giữa chúng.
 - Căn thẳng cột biểu tượng terminal và hiện biểu tượng Chia khi rê chuột qua phiên. Thanh công cụ dùng nhãn chữ cho Chia ô và Bỏ chia.
 - Giữ nhóm terminal đã chia khi mở hoặc chọn một phiên riêng.
+- Phát hiện Bash native, Git Bash và hồ sơ WSL Bash theo từng bản phân phối, đồng thời giữ gợi ý Tab của shell.
+- Dùng ngữ cảnh checkout và shell trong bảng gợi ý CNL, với dữ liệu cục bộ có giới hạn cho Git, PowerShell, CMD, Bash và WSL.

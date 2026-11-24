@@ -68,7 +68,7 @@ The rest of this reference uses `cnl`. If it is not on PATH, call the executable
 | `cnl status` | Report the target, mode, owned services, actual ports and Interface URL for the selected profile. |
 | `cnl stop [--desktop interface] [--dry-run]` | Ask the supervisor to stop the selected profile's owned session. An explicit target must match that session. |
 | `cnl logs [--service native\|vite] [--lines N]` | Read the tail of the current or most recent runtime log in the selected profile. Defaults to 60 lines of `native`. |
-| `cnl shell [powershell\|cmd\|bash\|wsl]` | Open an interactive native shell for the current working directory. Defaults to PowerShell on Windows and Bash on Linux. Windows can also select CMD or WSL. |
+| `cnl shell [PROFILE]` | Open an interactive shell in the current directory. Profiles include PowerShell 7, CMD, native Bash, Git Bash and WSL Bash according to platform and installation. |
 | `cnl completion <powershell\|bash>` | Write a shell completion script to stdout. |
 | `cnl verify [--receipt <RECEIPT>] [--browser-cache <ABSOLUTE_DIR>] [--dry-run]` | Verify the packaged candidate. Uses the profile's installed Chromium if available. Supply a compatible cache explicitly to include browser coverage. |
 | `cnl verify --repo <KEY> [--repo <KEY> ...] [--receipt <RECEIPT>] [--fpga-toolchain <DIR>] [--dry-run]` | Run selected component checks. Interface tests use staged candidate inputs. Embedded runs its RTL checks with a pinned toolchain. |
@@ -106,7 +106,7 @@ Use `--yes` to confirm bulk clone, add, or removal after checking the preview. L
 
 The dashboard shows the branch, Git status, local path and short commit hash. Open Details to see ahead and behind counts, or History for the commit log. Use `/` to search, Space to select, and `G` to filter groups. Open Details to see the full local path, or press `C` to copy it for the focused repository. Use `A` for actions, review the targets, and confirm changes with `Y`. Esc returns to the previous view.
 
-Press `:` to open the shared CNL command field. It uses the same history, completion and output controls as the main terminal. Press `T` to open the focused repository terminal.
+Press `:` to open the shared CNL command field for the focused checkout. Native commands and completion use the same checkout and its preferred shell. Press `T` to open the focused repository terminal.
 
 Use the integrated terminal toolbar or press F1 to open a terminal. The picker searches local repositories, prioritizes recent choices during the current CNL process, and offers installed shells. The Sessions panel shows each shell and repository on one row, with terminal icons aligned across split groups and standalone sessions. Hover a row for Split Terminal and Kill Terminal. Split is available for standalone sessions, and closing a running session asks for confirmation. Press F4 to focus or hide it, then / to filter, ↑ or ↓ to navigate, and Enter to focus a session. F6 and F7 switch sessions immediately.
 
@@ -166,7 +166,11 @@ Hover over a suggestion to highlight it. Click to insert it at the cursor and pr
 
 Enter native commands directly, such as `git status` or `Get-ChildItem | Select-Object -First 5` on Windows. Each prompt command runs in a separate process. Use `cnl shell` when you want working directory or environment changes to persist through multiple native commands. Type `exit` in that shell to return to the TUI.
 
-The TUI suggests local Git branches, known Git and shell options, and paths where supported. On Windows it follows PowerShell by default. Use an explicit `cmd /c` or `wsl --exec` prefix for CMD or Bash command suggestions. On Linux the default shell context is Bash. Suggestions use bounded local metadata.
+The palette combines CNL grammar with bounded background metadata. Git suggestions include installed built-ins and options, local and remote-tracking branches, tags, remotes, stashes, worktrees, configuration keys, and paths where the argument allows them. PowerShell suggests trusted cmdlets, aliases, parameters and available enum values. CMD and Bash combine built-ins and available executables with curated options. Use arrows or Tab to reach suggestions beyond the visible rows.
+
+The active repository profile supplies the shell and working directory. Windows defaults to PowerShell 7, with CMD available as a fallback, and Linux defaults to Bash. Use `cmd /c` or `wsl --exec` to switch completion syntax for a command. The CNL palette can suggest registered WSL distributions and standard guest syntax. Inside the running WSL terminal, Bash resolves guest commands, paths and users.
+
+Use `cnl shell git-bash` on Windows for Git for Windows Bash, `cnl shell bash` on Linux, or `cnl shell "wsl:Ubuntu 24.04"` for an installed WSL distribution. The `wsl` selector opens the configured default distribution. Use the same selector with `cnl repos terminal <REPO> --shell PROFILE` or persist it using `cnl repos config <REPO> --shell PROFILE`. Git Bash uses the MSYS environment. Each integrated terminal keeps its own shell and native Tab completion, including when you split or duplicate it.
 
 To reuse eligible CNL history across launches, start with `cnl tui --persist-history`. The CLI saves up to 100 eligible commands in `tui-history.json` under the selected profile when the terminal exits. Safe native commands can be recalled during the session. Arbitrary arguments, paths and credentials are excluded from stored history.
 

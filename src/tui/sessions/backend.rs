@@ -1,4 +1,5 @@
 use super::{Output, Result, locale};
+use crate::cli::native::ShellProfile;
 use anyhow::{Context, anyhow, ensure};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::{
@@ -43,25 +44,15 @@ pub(super) struct Backend {
 }
 
 impl Backend {
-    pub(super) fn start(shell: &str, cwd: &Path, size: PtySize, vi: bool) -> Result<Self> {
+    pub(super) fn start(
+        profile: &ShellProfile,
+        cwd: &Path,
+        size: PtySize,
+        vi: bool,
+    ) -> Result<Self> {
         validate_directory(cwd, vi)?;
-        #[cfg(windows)]
-        if shell == "cmd" {
-            use std::path::{Component, Prefix};
-            ensure!(
-                !matches!(cwd.components().next(), Some(Component::Prefix(prefix))
-                    if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))),
-                "{}",
-                locale(
-                    [
-                        "CMD cannot use a UNC working directory. Select PowerShell for this checkout.",
-                        "CMD không thể dùng thư mục làm việc UNC. Hãy chọn PowerShell cho checkout này.",
-                    ],
-                    vi
-                )
-            );
-        }
-        let command = command(shell, cwd, vi)?;
+        let command = command(profile, cwd, vi)?;
+        let shell = &profile.selector;
         let pair = native_pty_system().openpty(size).context(locale(
             [
                 "The interactive terminal could not be allocated",
@@ -167,75 +158,22 @@ fn validate_directory(cwd: &Path, vi: bool) -> Result<()> {
     Ok(())
 }
 
-fn command(shell: &str, cwd: &Path, vi: bool) -> Result<CommandBuilder> {
-    let template = crate::cli::native::shell(Some(shell))?;
-    let shell_cwd = if cfg!(windows) && matches!(shell, "cmd" | "wsl") {
-        // CMD treats a verbatim drive prefix like a network path. WSL's
-        // --cd adapter also expects the standard Windows path spelling.
-        let standard = crate::workspace::canonical(cwd)?;
-        ensure!(
-            std::fs::canonicalize(&standard)? == cwd,
-            "{}",
-            locale(
-                [
-                    "The selected shell cannot use this working directory",
-                    "Shell đã chọn không thể dùng thư mục làm việc này"
-                ],
-                vi
-            )
-        );
-        std::borrow::Cow::Owned(standard)
-    } else if cfg!(windows)
-        && shell == "powershell"
-        && let Some(original) = cwd.to_str()
-    {
-        // PowerShell exposes verbatim paths as provider-qualified locations.
-        // Keep the original path when the standard spelling cannot reach the same directory.
-        let visible = crate::workspace::user_path(cwd);
-        let standard = Path::new(visible.as_ref());
-        if visible != original && std::fs::canonicalize(standard).is_ok_and(|path| path == cwd) {
-            std::borrow::Cow::Owned(standard.to_path_buf())
-        } else {
-            std::borrow::Cow::Borrowed(cwd)
-        }
-    } else {
-        std::borrow::Cow::Borrowed(cwd)
-    };
+fn command(profile: &ShellProfile, cwd: &Path, vi: bool) -> Result<CommandBuilder> {
+    let template = profile.interactive(Some(cwd), vi)?;
     let mut command = CommandBuilder::new(template.get_program());
-    if shell == "wsl" {
-        // WSL accepts an absolute Windows path for --cd and requires it
-        // before --exec. Keep it one argv value, including embedded spaces.
-        command.arg("--cd");
-        command.arg(shell_cwd.as_ref());
-        command.args([
-            "--exec",
-            "env",
-            "HISTFILE=",
-            "bash",
-            "--noprofile",
-            "--norc",
-        ]);
-    } else {
-        command.args(template.get_args());
+    command.args(template.get_args());
+    if let Some(cwd) = template.get_current_dir() {
+        command.cwd(cwd);
     }
-    command.cwd(shell_cwd.as_ref());
+    for (name, value) in template.get_envs() {
+        if let Some(value) = value {
+            command.env(name, value);
+        } else {
+            command.env_remove(name);
+        }
+    }
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
-    command.env_remove("CNL_TUI_REPORT");
-    match shell {
-        "bash" => {
-            command.env("HISTFILE", "");
-            command.args(["--noprofile", "--norc"]);
-        }
-        "powershell" => {
-            command.args([
-                "-NoExit",
-                "-Command",
-                "Import-Module PSReadLine -ErrorAction SilentlyContinue; if (Get-Module PSReadLine) { Set-PSReadLineOption -HistorySaveStyle SaveNothing }",
-            ]);
-        }
-        _ => {}
-    }
     Ok(command)
 }
 
@@ -280,7 +218,7 @@ struct Process {
     exited: bool,
     _io_stop: IoStop,
     #[cfg(windows)]
-    job: Option<crate::tui::runner::ProcessJob>,
+    job: Option<crate::process::ProcessJob>,
 }
 
 impl Process {
@@ -292,7 +230,7 @@ impl Process {
         #[cfg(windows)]
         let job = child
             .as_raw_handle()
-            .and_then(|handle| crate::tui::runner::ProcessJob::attach_handle(handle).ok());
+            .and_then(|handle| crate::process::ProcessJob::attach_handle(handle).ok());
         Self {
             master,
             child,

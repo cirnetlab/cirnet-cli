@@ -123,7 +123,7 @@ pub(crate) fn app_for(vi: bool) -> Command {
                         .value_parser(value_parser!(u16).range(1..=500))
                         .default_value("60"),
                 ]),
-                Command::new("shell").arg(Arg::new("shell").value_parser(native::SHELLS)),
+                Command::new("shell").arg(Arg::new("shell").value_parser(native::shell_parser())),
                 Command::new("verify").args([
                     path("receipt"),
                     selected(),
@@ -182,7 +182,7 @@ pub fn run() -> Result<()> {
                     .map_or((None, None), |(directory, preferred)| {
                         (Some(directory.as_path()), preferred.as_deref())
                     });
-                let status = native::interactive_in(selected.or(preferred), directory)?;
+                let status = native::interactive_in(selected.or(preferred), directory, vi)?;
                 std::process::exit(status.code().unwrap_or(1));
             }
             _ => {}

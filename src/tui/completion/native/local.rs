@@ -10,30 +10,58 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod git;
+mod tools;
+
+pub(super) use git::GitData;
+
 const MAX_SCANNED: usize = 1024;
-const MAX_CACHE: usize = 12;
+const MAX_CACHE: usize = 24;
+const MAX_WANTED: usize = 8;
 const MAX_REF_BYTES: u64 = 512 * 1024;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum Key {
     Paths(PathBuf),
-    Branches(PathBuf),
     Executables { path: OsString, cwd: PathBuf },
+    GitCommands,
+    GitOptions(String),
+    GitRepository { cwd: PathBuf, kind: GitData },
+    GitConfigKeys,
+    PowerShellCommands,
+    PowerShellParameters(String),
+    PowerShellValues { command: String, parameter: String },
+    BashCommands,
+    CmdExecutables { path: OsString, cwd: PathBuf },
+    WslDistributions,
 }
 
 impl Key {
     fn lifetime(&self) -> Duration {
         match self {
-            Self::Executables { .. } => Duration::from_secs(30),
-            Self::Paths(_) | Self::Branches(_) => Duration::from_secs(3),
+            Self::Paths(_) | Self::GitRepository { .. } => Duration::from_secs(3),
+            Self::WslDistributions => Duration::from_secs(10),
+            Self::Executables { .. } | Self::CmdExecutables { .. } => Duration::from_secs(30),
+            _ => Duration::from_secs(60),
         }
     }
 
     fn scan(&self) -> Vec<Entry> {
         match self {
             Self::Paths(path) => paths(path),
-            Self::Branches(cwd) => branches(cwd).into_iter().map(Entry::named).collect(),
             Self::Executables { path, cwd } => executables(path, cwd),
+            Self::GitCommands => tools::git_commands(),
+            Self::GitOptions(command) => tools::git_options(command),
+            Self::GitRepository { cwd, kind } => git::repository(cwd, *kind),
+            Self::GitConfigKeys => tools::git_config_keys(),
+            Self::PowerShellCommands => tools::powershell(None, None),
+            Self::PowerShellParameters(command) => tools::powershell(Some(command), None),
+            Self::PowerShellValues { command, parameter } => {
+                tools::powershell(Some(command), Some(parameter))
+            }
+            Self::BashCommands => tools::bash_commands(),
+            Self::CmdExecutables { path, cwd } => cmd_executables(path, cwd),
+            Self::WslDistributions => tools::wsl_distributions(),
         }
     }
 }
@@ -52,6 +80,17 @@ impl Entry {
     }
 }
 
+fn named_entries(names: impl IntoIterator<Item = String>) -> Vec<Entry> {
+    names
+        .into_iter()
+        .filter(|name| name.len() <= 4096 && safe_text(name))
+        .take(MAX_SCANNED)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(Entry::named)
+        .collect()
+}
+
 struct Snapshot {
     key: Key,
     entries: Rc<[Entry]>,
@@ -65,8 +104,8 @@ struct Worker {
 
 impl Worker {
     fn start() -> Option<Self> {
-        let (requests, work) = mpsc::sync_channel::<Key>(1);
-        let (responses, results) = mpsc::channel();
+        let (requests, work) = mpsc::sync_channel::<Key>(2);
+        let (responses, results) = mpsc::sync_channel(3);
         thread::Builder::new()
             .name("cnl-completion".into())
             .spawn(move || {
@@ -87,13 +126,13 @@ pub(super) struct Cache {
     worker: Option<Worker>,
     entries: VecDeque<Snapshot>,
     pending: Vec<Key>,
-    wanted: Option<Key>,
+    wanted: Vec<Key>,
     waiting_for_slot: bool,
 }
 
 impl Cache {
     pub(super) fn reset_request(&mut self) {
-        self.wanted = None;
+        self.wanted.clear();
         self.waiting_for_slot = false;
     }
 
@@ -102,7 +141,7 @@ impl Cache {
         if let Some(worker) = &self.worker {
             while let Ok((key, entries)) = worker.results.try_recv() {
                 self.pending.retain(|request| request != &key);
-                ready |= self.wanted.as_ref() == Some(&key);
+                ready |= self.wanted.contains(&key);
                 self.entries.retain(|entry| entry.key != key);
                 self.entries.push_back(Snapshot {
                     key,
@@ -121,17 +160,14 @@ impl Cache {
     }
 
     pub(super) fn metadata_pending(&self) -> bool {
-        self.waiting_for_slot
-            || self
-                .wanted
-                .as_ref()
-                .is_some_and(|key| self.pending.contains(key))
+        self.waiting_for_slot || self.wanted.iter().any(|key| self.pending.contains(key))
     }
 
     pub(super) fn get(&mut self, key: Key) -> Rc<[Entry]> {
-        self.wanted = Some(key.clone());
-        self.metadata_ready();
-        self.schedule_wanted();
+        if self.wanted.len() < MAX_WANTED && !self.wanted.contains(&key) {
+            self.wanted.push(key.clone());
+            self.schedule_wanted();
+        }
         self.entries
             .iter()
             .find(|entry| entry.key == key)
@@ -140,27 +176,32 @@ impl Cache {
 
     fn schedule_wanted(&mut self) {
         self.waiting_for_slot = false;
-        let Some(key) = self.wanted.as_ref() else {
-            return;
-        };
-        if self.pending.contains(key)
-            || self
-                .entries
-                .iter()
-                .any(|entry| &entry.key == key && entry.scanned.elapsed() < key.lifetime())
-        {
-            return;
-        }
-        if self.worker.is_none() {
-            self.worker = Worker::start();
-        }
-        if let Some(worker) = &self.worker {
+        for key in &self.wanted {
+            if self.pending.contains(key)
+                || self
+                    .entries
+                    .iter()
+                    .any(|entry| &entry.key == key && entry.scanned.elapsed() < key.lifetime())
+            {
+                continue;
+            }
+            if self.worker.is_none() {
+                self.worker = Worker::start();
+            }
+            let Some(worker) = &self.worker else {
+                return;
+            };
             match worker.requests.try_send(key.clone()) {
                 Ok(()) => self.pending.push(key.clone()),
-                Err(mpsc::TrySendError::Full(_)) => self.waiting_for_slot = true,
+                Err(mpsc::TrySendError::Full(_)) => {
+                    self.waiting_for_slot = true;
+                    return;
+                }
                 Err(mpsc::TrySendError::Disconnected(_)) => {
                     self.worker = None;
                     self.pending.clear();
+                    self.waiting_for_slot = true;
+                    return;
                 }
             }
         }
@@ -231,90 +272,53 @@ fn executables(path: &OsString, cwd: &Path) -> Vec<Entry> {
     names.into_iter().map(Entry::named).collect()
 }
 
-fn branches(cwd: &Path) -> BTreeSet<String> {
-    let Some(git) = cwd
-        .ancestors()
-        .take(32)
-        .map(|path| path.join(".git"))
-        .find(|path| local_metadata(path).is_some())
-    else {
-        return BTreeSet::new();
-    };
-    let git = if let Some(marker) = bounded_text(&git, 4096) {
-        let Some(destination) = marker.trim().strip_prefix("gitdir: ") else {
-            return BTreeSet::new();
-        };
-        git.parent().unwrap_or(cwd).join(destination)
-    } else {
-        git
-    };
-    let common_dir = bounded_text(&git.join("commondir"), 4096)
-        .filter(|text| !text.trim().is_empty())
-        .map_or_else(|| git.clone(), |text| git.join(text.trim()));
-    let mut branches = BTreeSet::new();
-    if let Some(packed) = bounded_text(&common_dir.join("packed-refs"), MAX_REF_BYTES) {
-        for name in packed.lines().filter_map(|line| {
-            let (_, reference) = line.split_once(' ')?;
-            reference.strip_prefix("refs/heads/")
-        }) {
-            if safe_ref(name) {
-                branches.insert(name.to_owned());
-            }
-            if branches.len() == MAX_SCANNED {
-                return branches;
-            }
-        }
-    }
-    let mut dirs = vec![(common_dir.join("refs/heads"), String::new(), 0)];
-    let mut scanned = 0;
-    while let Some((path, prefix, depth)) = dirs.pop() {
-        for entry in directory(&path)
+#[cfg(windows)]
+fn cmd_executables(path: &OsString, cwd: &Path) -> Vec<Entry> {
+    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    let extensions = extensions
+        .split(';')
+        .take(24)
+        .filter_map(|extension| extension.strip_prefix('.'))
+        .collect::<Vec<_>>();
+    let mut names = BTreeSet::new();
+    for folder in std::iter::once(cwd.to_owned()).chain(std::env::split_paths(path).take(24)) {
+        for entry in directory(&cwd.join(folder))
             .into_iter()
             .flatten()
+            .take(768)
             .filter_map(Result::ok)
         {
-            if scanned == MAX_SCANNED || branches.len() == MAX_SCANNED {
-                return branches;
-            }
-            scanned += 1;
-            let Ok(name) = entry.file_name().into_string() else {
+            let path = entry.path();
+            let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
                 continue;
             };
-            let name = format!("{prefix}{name}");
-            if !safe_ref(&name) {
-                continue;
-            }
-            let Some(metadata) = entry_metadata(&entry.path()) else {
+            let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
                 continue;
             };
-            if redirected(&metadata) {
-                continue;
-            }
-            if metadata.is_dir() && depth < 12 {
-                dirs.push((entry.path(), format!("{name}/"), depth + 1));
-            } else if metadata.is_file() {
-                branches.insert(name);
+            if extensions
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(extension))
+                && safe_text(name)
+                && entry_metadata(&path)
+                    .is_some_and(|metadata| metadata.is_file() && !redirected(&metadata))
+            {
+                names.insert(name.to_owned());
+                if names.len() == MAX_SCANNED {
+                    return named_entries(names);
+                }
             }
         }
     }
-    branches
+    named_entries(names)
+}
+
+#[cfg(not(windows))]
+fn cmd_executables(_: &OsString, _: &Path) -> Vec<Entry> {
+    Vec::new()
 }
 
 pub(super) fn safe_text(value: &str) -> bool {
     !value.is_empty() && !value.chars().any(char::is_control)
-}
-
-fn safe_ref(value: &str) -> bool {
-    safe_text(value)
-        && value != "@"
-        && !value.starts_with('-')
-        && !value.ends_with('.')
-        && !value.contains([' ', '~', '^', ':', '?', '*', '[', '\\'])
-        && !value.contains("..")
-        && !value.contains("@{")
-        && value
-            .split('/')
-            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"))
 }
 
 fn bounded_text(path: &Path, limit: u64) -> Option<String> {
@@ -490,4 +494,142 @@ fn remote_mounts() -> Option<Vec<PathBuf>> {
 #[cfg(not(target_os = "linux"))]
 fn local_mount(_: &Path) -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_ignores_stale_results_and_keeps_multiple_current_keys() {
+        let (requests, _work) = mpsc::sync_channel(3);
+        let (responses, results) = mpsc::sync_channel(3);
+        let mut cache = Cache {
+            worker: Some(Worker { requests, results }),
+            ..Cache::default()
+        };
+        let stale = Key::Paths(PathBuf::from("stale"));
+        let current = Key::Paths(PathBuf::from("current"));
+        let second = Key::GitCommands;
+
+        assert!(cache.get(stale.clone()).is_empty());
+        cache.reset_request();
+        assert!(cache.get(current.clone()).is_empty());
+        assert!(cache.get(second.clone()).is_empty());
+
+        responses
+            .try_send((stale, vec![Entry::named("wrong".into())]))
+            .unwrap_or_else(|_| panic!("mock worker result queue is available"));
+        assert!(!cache.metadata_ready());
+        assert!(cache.metadata_pending());
+
+        responses
+            .try_send((current.clone(), vec![Entry::named("right".into())]))
+            .unwrap_or_else(|_| panic!("mock worker result queue is available"));
+        assert!(cache.metadata_ready());
+        assert_eq!(cache.get(current)[0].name, "right");
+        assert!(cache.metadata_pending());
+
+        responses
+            .try_send((second, Vec::new()))
+            .unwrap_or_else(|_| panic!("mock worker result queue is available"));
+        assert!(cache.metadata_ready());
+        assert!(!cache.metadata_pending());
+    }
+
+    #[test]
+    fn cache_keeps_requests_bounded_when_discovery_cannot_make_progress() {
+        let (requests, work) = mpsc::sync_channel(2);
+        let (responses, results) = mpsc::sync_channel(2);
+        let mut cache = Cache {
+            worker: Some(Worker { requests, results }),
+            ..Cache::default()
+        };
+
+        for index in 0..MAX_WANTED + 3 {
+            assert!(
+                cache
+                    .get(Key::Paths(PathBuf::from(index.to_string())))
+                    .is_empty()
+            );
+        }
+        assert_eq!(cache.wanted.len(), MAX_WANTED);
+        assert_eq!(cache.pending.len(), 2);
+        assert!(cache.waiting_for_slot);
+
+        cache.reset_request();
+        let current = Key::Paths(PathBuf::from("latest"));
+        assert!(cache.get(current.clone()).is_empty());
+        let stale = work.try_recv().unwrap();
+        responses
+            .try_send((stale, Vec::new()))
+            .unwrap_or_else(|_| panic!("mock worker result queue is available"));
+        assert!(!cache.metadata_ready());
+        assert!(cache.metadata_pending());
+        assert!(cache.pending.contains(&current));
+    }
+
+    #[test]
+    fn repository_metadata_reads_linked_refs_and_config_without_exposing_values() {
+        let fixture =
+            std::env::temp_dir().join(format!("cnl-metadata-test-{}", std::process::id()));
+        let main = fixture.join("main");
+        let linked = fixture.join("other");
+        let common = main.join(".git");
+        let worktree = common.join("worktrees/other");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(common.join("refs/heads")).unwrap();
+        fs::create_dir_all(common.join("logs/refs")).unwrap();
+        fs::create_dir_all(&linked).unwrap();
+        fs::write(
+            linked.join(".git"),
+            "gitdir: ../main/.git/worktrees/other\n",
+        )
+        .unwrap();
+        fs::write(worktree.join("commondir"), "../..\n").unwrap();
+        fs::write(
+            worktree.join("gitdir"),
+            linked.join(".git").to_str().unwrap(),
+        )
+        .unwrap();
+        fs::write(common.join("refs/heads/local"), "abc\n").unwrap();
+        fs::write(common.join("logs/refs/stash"), "one\ntwo\n").unwrap();
+        fs::write(
+            common.join("packed-refs"),
+            "abc refs/remotes/origin/main\nabc refs/remotes/origin/HEAD\nabc refs/tags/v1.0\n",
+        )
+        .unwrap();
+        fs::write(
+            common.join("config"),
+            "[remote \"origin\"]\nurl = https://user:secret@invalid.invalid\n[include]\npath = //invalid.invalid/config\n",
+        ).unwrap();
+
+        let names = |kind| {
+            Key::GitRepository {
+                cwd: linked.clone(),
+                kind,
+            }
+            .scan()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>()
+        };
+        let branches = names(GitData::Branches);
+        let refs = names(GitData::Refs);
+        let tags = names(GitData::Tags);
+        let remotes = names(GitData::Remotes);
+        let stashes = names(GitData::Stashes);
+        let worktrees = names(GitData::Worktrees);
+        let config = names(GitData::Config);
+        fs::remove_dir_all(&fixture).unwrap();
+
+        assert_eq!(branches, ["local", "origin/main"]);
+        assert!(refs.contains(&"refs/remotes/origin/main".into()));
+        assert!(refs.contains(&"refs/tags/v1.0".into()));
+        assert_eq!(tags, ["v1.0"]);
+        assert_eq!(remotes, ["origin"]);
+        assert_eq!(stashes, ["stash@{0}", "stash@{1}"]);
+        assert!(worktrees.contains(&linked.to_string_lossy().into_owned()));
+        assert_eq!(config, ["remote.origin.url"]);
+    }
 }

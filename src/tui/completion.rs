@@ -1,9 +1,9 @@
 use clap::{Arg, Command};
-use std::{borrow::Cow, collections::HashSet, ops::Range, sync::OnceLock};
+use std::{borrow::Cow, collections::HashSet, ops::Range, path::Path, sync::OnceLock};
 
 mod native;
 
-const LIMIT: usize = 7;
+pub(super) const LIMIT: usize = 32;
 const MAX_INPUT: usize = 8192;
 
 pub(super) fn grammar() -> &'static Command {
@@ -157,6 +157,7 @@ fn fuzzy_score(candidate: &str, prefix: &str) -> Option<usize> {
 pub(super) struct Completer {
     vi: bool,
     native: native::Completer,
+    context: native::Context,
     repositories: Vec<String>,
 }
 
@@ -165,6 +166,7 @@ impl Completer {
         Self {
             vi,
             native: native::Completer::new(),
+            context: native::Context::default(),
             repositories: crate::workspace::Repo::KEYS
                 .into_iter()
                 .map(str::to_owned)
@@ -174,6 +176,11 @@ impl Completer {
 
     pub(super) fn set_language(&mut self, vi: bool) {
         self.vi = vi;
+    }
+
+    pub(super) fn set_native_context(&mut self, directory: Option<&Path>, shell: Option<&str>) {
+        self.context.set(directory, shell);
+        self.native.reset_request();
     }
 
     pub(super) fn set_repository_values(&mut self, values: Vec<String>) {
@@ -187,6 +194,10 @@ impl Completer {
         };
     }
 
+    pub(super) fn reset_request(&self) {
+        self.native.reset_request();
+    }
+
     pub(super) fn metadata_ready(&self) -> bool {
         self.native.metadata_ready()
     }
@@ -195,22 +206,25 @@ impl Completer {
         self.native.metadata_pending()
     }
 
+    pub(super) fn is_cnl_input(&self, input: &str) -> bool {
+        let first = input.split_whitespace().next().unwrap_or_default();
+        first.is_empty()
+            || matches!(first, "cnl" | "cnl.exe" | "clear")
+            || first.starts_with('-')
+            || grammar().find_subcommand(first).is_some() && !self.context.routes_env_wrapper(input)
+    }
+
     pub(super) fn suggestions(&self, input: &str, cursor: usize) -> Vec<Suggestion> {
         self.native.reset_request();
         if input.len() > MAX_INPUT || !input.is_char_boundary(cursor) {
             return Vec::new();
         }
-        let first = input[..cursor]
-            .split_whitespace()
-            .next()
-            .unwrap_or_default();
-        let is_cnl = matches!(first, "cnl" | "cnl.exe" | "clear")
-            || first.starts_with('-')
-            || grammar().find_subcommand(first).is_some();
-        if is_cnl || first.is_empty() {
+        if self.is_cnl_input(&input[..cursor]) {
             return self.cnl_suggestions(input, cursor);
         }
-        let native = self.native.suggestions(input, cursor, self.vi);
+        let native = self
+            .native
+            .suggestions(input, cursor, self.vi, &self.context);
         if !input[..cursor].trim_start().contains(char::is_whitespace) {
             let mut choices = self.cnl_suggestions(input, cursor);
             choices.extend(native);
@@ -463,6 +477,23 @@ impl Completer {
             }
             return;
         }
+        if arg.get_id() == "shell"
+            && matches!(commands, ["shell"] | ["repos", "terminal" | "config"])
+        {
+            for name in self.native.wsl_profiles() {
+                let text = if name.contains(char::is_whitespace) || name.contains(['\'', '"']) {
+                    format!("\"{}\"", name.replace('"', "\\\""))
+                } else {
+                    name.clone()
+                };
+                let detail = if self.vi {
+                    "Bản phân phối WSL đã cài"
+                } else {
+                    "Installed WSL distribution"
+                };
+                candidates.push((text, name, detail.into(), Kind::Value));
+            }
+        }
         for value in arg
             .get_value_parser()
             .possible_values()
@@ -676,6 +707,72 @@ mod tests {
     }
 
     #[test]
+    fn native_git_omits_used_options_in_the_active_pipeline_segment() {
+        let completer = Completer::new(false);
+        let input = "echo ready | git switch --detach --de";
+        let options = completer.suggestions(input, input.len());
+        assert!(!options.iter().any(|item| item.text == "--detach"));
+        let input = "echo ready | git switch --de";
+        assert!(
+            completer
+                .suggestions(input, input.len())
+                .iter()
+                .any(|item| {
+                    item.text == "--detach" && &input[item.insert_range.clone()] == "--de"
+                })
+        );
+    }
+
+    #[test]
+    fn native_git_option_values_and_quoted_bash_keep_their_replacement_ranges() {
+        let completer = Completer::new(false);
+        for (input, token, expected) in [
+            ("git log --color=au --oneline", "au", "auto"),
+            ("bash -c 'git st --short'", "st", "status"),
+        ] {
+            let start = input.find(token).unwrap();
+            let cursor = start + token.len();
+            assert!(
+                completer
+                    .suggestions(input, cursor)
+                    .iter()
+                    .any(|item| { item.text == expected && item.insert_range == (start..cursor) }),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_metadata_uses_the_selected_checkout_and_shell() -> io::Result<()> {
+        let root = TestDir::new()?;
+        fs::write(root.0.join("Tệp đích.txt"), "")?;
+        let mut completer = Completer::new(false);
+        completer.set_native_context(Some(&root.0), Some("bash"));
+        let command = "echo ready | cat <Tệp";
+        assert!(
+            wait_for_metadata(&completer, command, command.len())
+                .iter()
+                .any(|item| {
+                    item.kind == Kind::Path
+                        && item.label == "Tệp đích.txt"
+                        && item.text == "'Tệp đích.txt'"
+                })
+        );
+        let command = "env LC_ALL=C git switch --de";
+        assert!(
+            completer
+                .suggestions(command, command.len())
+                .iter()
+                .any(|item| item.text == "--detach")
+        );
+
+        // A guest relative pathname must never resolve through the Windows checkout.
+        completer.set_native_context(Some(&root.0), Some("wsl:Test Distribution"));
+        assert!(completer.suggestions("cat Tệp", "cat Tệp".len()).is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn native_windows_shell_prefixes_route_to_their_own_syntax() {
         let completer = Completer::new(true);
         let contains = |line: &str, candidate| {
@@ -686,11 +783,11 @@ mod tests {
         };
         if cfg!(windows) {
             assert!(contains("cmd /c dir /", "/B"));
-            assert!(contains("wsl --exec ls --", "--all"));
+            assert!(contains("wsl --exec ls -", "-a"));
             assert!(contains("Get-Ch", "Get-ChildItem"));
             assert!(contains("Get-ChildItem -", "-Filter"));
         } else {
-            assert!(contains("ls --", "--all"));
+            assert!(contains("ls -", "-a"));
         }
     }
 

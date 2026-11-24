@@ -210,7 +210,10 @@ pub(crate) fn option(id: &str) -> Option<Localized> {
         ],
         "service" => ["Select the runtime log", "Chọn nhật ký runtime"],
         "lines" => ["Maximum number of log lines", "Số dòng nhật ký tối đa"],
-        "shell" => ["Select a native shell", "Chọn shell native"],
+        "shell" => [
+            "Select a native shell or wsl:<distribution>",
+            "Chọn shell native hoặc wsl:<distribution>",
+        ],
         "cursor" => ["Cursor offset", "Vị trí con trỏ"],
         "line" => ["Command line", "Dòng lệnh"],
         "help" => ["Print help", "Hiển thị trợ giúp"],

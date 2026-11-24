@@ -60,6 +60,56 @@ pub(super) const GIT_ACTIONS: &[Item] = &[
         "cherry-pick",
         ["Apply selected commits", "Áp dụng commit đã chọn"],
     ),
+    (
+        "revert",
+        ["Reverse selected commits", "Đảo ngược commit đã chọn"],
+    ),
+    (
+        "reflog",
+        ["Inspect the reference log", "Kiểm tra nhật ký ref"],
+    ),
+    (
+        "bisect",
+        [
+            "Find a commit by binary search",
+            "Tìm commit bằng tìm kiếm nhị phân",
+        ],
+    ),
+    (
+        "blame",
+        ["Show the commit for each line", "Hiện commit của từng dòng"],
+    ),
+    ("submodule", ["Manage submodules", "Quản lý mô-đun con"]),
+    (
+        "describe",
+        ["Name a commit using refs", "Đặt tên commit bằng ref"],
+    ),
+    (
+        "config",
+        ["Read or set configuration", "Đọc hoặc đặt cấu hình"],
+    ),
+    (
+        "archive",
+        ["Create an archive from a tree", "Tạo bản lưu trữ từ cây"],
+    ),
+    ("bundle", ["Manage bundle files", "Quản lý tệp bundle"]),
+    (
+        "clean",
+        ["Remove untracked files", "Xóa tệp chưa được theo dõi"],
+    ),
+    (
+        "maintenance",
+        ["Manage repository maintenance", "Quản lý bảo trì kho mã"],
+    ),
+    (
+        "ls-files",
+        ["List files in the index", "Liệt kê tệp trong vùng chờ"],
+    ),
+    (
+        "for-each-ref",
+        ["List and format refs", "Liệt kê và định dạng ref"],
+    ),
+    ("rev-parse", ["Resolve revisions", "Phân giải phiên bản"]),
 ];
 
 pub(super) const GIT_FLAGS: &[Item] = &[
@@ -336,6 +386,75 @@ pub(super) fn git_actions(command: &str) -> &'static [Item] {
             ("add", ["Add a working tree", "Thêm cây làm việc"]),
             ("remove", ["Remove a working tree", "Xóa cây làm việc"]),
         ],
+        "submodule" => &[
+            ("add", ["Add a submodule", "Thêm mô-đun con"]),
+            (
+                "status",
+                ["Show submodule state", "Hiện trạng thái mô-đun con"],
+            ),
+            ("init", ["Initialize submodules", "Khởi tạo các mô-đun con"]),
+            (
+                "update",
+                [
+                    "Update submodule checkouts",
+                    "Cập nhật bản làm việc của mô-đun con",
+                ],
+            ),
+            (
+                "sync",
+                ["Synchronize submodule URLs", "Đồng bộ URL mô-đun con"],
+            ),
+        ],
+        "bisect" => &[
+            ("start", ["Start a bisection", "Bắt đầu tìm kiếm nhị phân"]),
+            (
+                "good",
+                ["Mark a revision as good", "Đánh dấu phiên bản tốt"],
+            ),
+            ("bad", ["Mark a revision as bad", "Đánh dấu phiên bản lỗi"]),
+            (
+                "skip",
+                [
+                    "Skip untestable revisions",
+                    "Bỏ qua phiên bản không thể kiểm thử",
+                ],
+            ),
+            ("reset", ["End the bisection", "Kết thúc tìm kiếm nhị phân"]),
+        ],
+        "maintenance" => &[
+            ("run", ["Run maintenance tasks", "Chạy tác vụ bảo trì"]),
+            ("start", ["Schedule maintenance", "Lên lịch bảo trì"]),
+            ("stop", ["Stop scheduled maintenance", "Dừng lịch bảo trì"]),
+            (
+                "register",
+                ["Register this repository", "Đăng ký kho mã này"],
+            ),
+            (
+                "unregister",
+                ["Unregister this repository", "Hủy đăng ký kho mã này"],
+            ),
+        ],
+        "reflog" => &[
+            ("show", ["Show a reflog", "Hiện nhật ký ref"]),
+            ("exists", ["Check for a reflog", "Kiểm tra nhật ký ref"]),
+            (
+                "expire",
+                ["Expire old reflog entries", "Hết hạn mục nhật ký ref cũ"],
+            ),
+            ("delete", ["Delete a reflog entry", "Xóa mục nhật ký ref"]),
+        ],
+        "bundle" => &[
+            ("create", ["Create a bundle", "Tạo bundle"]),
+            ("verify", ["Verify a bundle", "Xác minh bundle"]),
+            (
+                "list-heads",
+                ["List bundle refs", "Liệt kê ref trong bundle"],
+            ),
+            (
+                "unbundle",
+                ["Unpack bundle objects", "Giải nén đối tượng trong bundle"],
+            ),
+        ],
         _ => &[],
     }
 }
@@ -418,6 +537,22 @@ pub(super) const POWERSHELL: &[Item] = &[
     ("cp", ["Alias for Copy-Item", "Bí danh của Copy-Item"]),
     ("mv", ["Alias for Move-Item", "Bí danh của Move-Item"]),
     ("rm", ["Alias for Remove-Item", "Bí danh của Remove-Item"]),
+    ("Get-Module", ["List modules", "Liệt kê mô-đun"]),
+    ("Import-Module", ["Import a module", "Nhập mô-đun"]),
+    ("Get-Process", ["List processes", "Liệt kê tiến trình"]),
+    (
+        "Select-String",
+        ["Search text for patterns", "Tìm mẫu trong văn bản"],
+    ),
+    (
+        "Measure-Object",
+        ["Measure object properties", "Đo thuộc tính đối tượng"],
+    ),
+    ("Sort-Object", ["Sort objects", "Sắp xếp đối tượng"]),
+    (
+        "ConvertFrom-Json",
+        ["Read JSON as objects", "Đọc JSON thành đối tượng"],
+    ),
 ];
 
 pub(super) fn ps_command(command: &str) -> &str {
@@ -514,6 +649,33 @@ pub(super) fn powershell_options(command: &str) -> &'static [Item] {
             ("-Property", ["Choose properties", "Chọn thuộc tính"]),
         ],
         "get-command" | "get-help" => &[("-Name", ["Set the command name", "Đặt tên lệnh"])],
+        "get-process" => &[
+            (
+                "-Name",
+                ["Filter by process name", "Lọc theo tên tiến trình"],
+            ),
+            ("-Id", ["Filter by process ID", "Lọc theo ID tiến trình"]),
+        ],
+        "get-module" => &[
+            ("-Name", ["Set the module name", "Đặt tên mô-đun"]),
+            (
+                "-ListAvailable",
+                ["List installed modules", "Liệt kê mô-đun đã cài"],
+            ),
+        ],
+        "select-string" => &[
+            PATH,
+            LITERAL_PATH,
+            ("-Pattern", ["Set the search pattern", "Đặt mẫu tìm kiếm"]),
+            (
+                "-SimpleMatch",
+                ["Match literal text", "Khớp văn bản nguyên văn"],
+            ),
+            (
+                "-CaseSensitive",
+                ["Match letter case", "Phân biệt hoa thường"],
+            ),
+        ],
         _ => &[],
     }
 }
@@ -548,6 +710,57 @@ pub(super) const CMD: &[Item] = &[
         "ver",
         ["Show the Windows version", "Hiện phiên bản Windows"],
     ),
+    (
+        "assoc",
+        ["Manage file associations", "Quản lý liên kết tệp"],
+    ),
+    (
+        "call",
+        ["Call a batch script or label", "Gọi tập lệnh lô hoặc nhãn"],
+    ),
+    (
+        "exit",
+        ["Exit CMD or a batch script", "Thoát CMD hoặc tập lệnh lô"],
+    ),
+    ("for", ["Repeat a command", "Lặp lại một lệnh"]),
+    (
+        "ftype",
+        ["Manage file type commands", "Quản lý lệnh cho loại tệp"],
+    ),
+    (
+        "goto",
+        ["Jump to a batch label", "Chuyển đến nhãn trong tập lệnh lô"],
+    ),
+    (
+        "if",
+        ["Run a conditional command", "Chạy lệnh có điều kiện"],
+    ),
+    (
+        "pushd",
+        ["Save and change directories", "Lưu và đổi thư mục"],
+    ),
+    (
+        "popd",
+        [
+            "Restore the previous directory",
+            "Khôi phục thư mục trước đó",
+        ],
+    ),
+    (
+        "setlocal",
+        [
+            "Start local environment changes",
+            "Bắt đầu thay đổi môi trường cục bộ",
+        ],
+    ),
+    (
+        "endlocal",
+        [
+            "End local environment changes",
+            "Kết thúc thay đổi môi trường cục bộ",
+        ],
+    ),
+    ("pause", ["Wait for a key press", "Chờ thao tác nhấn phím"]),
 ];
 
 pub(super) const CMD_FLAGS: &[Item] = &[
@@ -578,6 +791,64 @@ pub(super) fn cmd_options(command: &str) -> &'static [Item] {
             ("/I", ["Ignore case", "Bỏ qua chữ hoa và chữ thường"]),
             ("/S", ["Search subdirectories", "Tìm trong thư mục con"]),
             ("/N", ["Print matching line numbers", "Hiện số dòng khớp"]),
+        ],
+        "tasklist" => &[
+            ("/FI", ["Filter running tasks", "Lọc tác vụ đang chạy"]),
+            ("/FO", ["Set the output format", "Đặt định dạng đầu ra"]),
+            ("/NH", ["Omit column headings", "Bỏ tiêu đề cột"]),
+            ("/V", ["Show task details", "Hiện chi tiết tác vụ"]),
+        ],
+        "ipconfig" => &[
+            (
+                "/all",
+                [
+                    "Show the full adapter configuration",
+                    "Hiện đầy đủ cấu hình bộ điều hợp",
+                ],
+            ),
+            (
+                "/displaydns",
+                [
+                    "Display the DNS resolver cache",
+                    "Hiện bộ nhớ đệm phân giải DNS",
+                ],
+            ),
+        ],
+        "where" => &[
+            (
+                "/R",
+                [
+                    "Search from a directory recursively",
+                    "Tìm đệ quy từ một thư mục",
+                ],
+            ),
+            (
+                "/Q",
+                [
+                    "Return a status without listing matches",
+                    "Trả trạng thái mà không liệt kê kết quả",
+                ],
+            ),
+            (
+                "/F",
+                [
+                    "Quote matching file names",
+                    "Đặt tên tệp khớp trong dấu ngoặc kép",
+                ],
+            ),
+        ],
+        "set" => &[
+            (
+                "/A",
+                ["Evaluate an arithmetic expression", "Tính biểu thức số học"],
+            ),
+            (
+                "/P",
+                [
+                    "Read a variable value from input",
+                    "Đọc giá trị biến từ đầu vào",
+                ],
+            ),
         ],
         _ => &[],
     }
@@ -625,6 +896,34 @@ pub(super) const BASH: &[Item] = &[
         ["Read shell commands from a file", "Đọc lệnh shell từ tệp"],
     ),
     ("bash", ["Start the Bash shell", "Mở Bash"]),
+    (
+        "read",
+        ["Read values into variables", "Đọc giá trị vào biến"],
+    ),
+    (
+        "command",
+        ["Run or inspect a command", "Chạy hoặc kiểm tra một lệnh"],
+    ),
+    (
+        "type",
+        ["Describe command resolution", "Mô tả cách phân giải lệnh"],
+    ),
+    (
+        "set",
+        [
+            "Set shell options or arguments",
+            "Đặt tùy chọn shell hoặc đối số",
+        ],
+    ),
+    (
+        "shopt",
+        [
+            "Set Bash optional behavior",
+            "Đặt hành vi tùy chọn của Bash",
+        ],
+    ),
+    ("jobs", ["Show background jobs", "Hiện các tác vụ chạy nền"]),
+    ("wait", ["Wait for jobs to finish", "Chờ tác vụ hoàn tất"]),
 ];
 
 pub(super) const WSL_FLAGS: &[Item] = &[
@@ -639,6 +938,34 @@ pub(super) const WSL_FLAGS: &[Item] = &[
         "--list",
         ["List Linux distributions", "Liệt kê bản phân phối Linux"],
     ),
+    (
+        "--cd",
+        [
+            "Set the starting Linux directory",
+            "Đặt thư mục Linux ban đầu",
+        ],
+    ),
+    (
+        "--shutdown",
+        ["Shut down the WSL virtual machine", "Tắt máy ảo WSL"],
+    ),
+    (
+        "--terminate",
+        ["Stop a selected distribution", "Dừng bản phân phối đã chọn"],
+    ),
+    (
+        "--set-default",
+        ["Set the default distribution", "Đặt bản phân phối mặc định"],
+    ),
+    (
+        "--set-version",
+        [
+            "Change a distribution's WSL version",
+            "Đổi phiên bản WSL của bản phân phối",
+        ],
+    ),
+    ("--export", ["Export a distribution", "Xuất bản phân phối"]),
+    ("--import", ["Import a distribution", "Nhập bản phân phối"]),
 ];
 
 pub(super) fn bash_options(command: &str) -> &'static [Item] {
@@ -724,6 +1051,69 @@ pub(super) fn bash_options(command: &str) -> &'static [Item] {
             VERBOSE,
         ],
         "head" | "tail" => &[("--lines", ["Set the number of lines", "Đặt số dòng"])],
+        _ => bash_portable_options(command),
+    }
+}
+
+pub(super) fn bash_portable_options(command: &str) -> &'static [Item] {
+    const INTERACTIVE: Item = ("-i", ["Prompt before acting", "Hỏi trước khi thực hiện"]);
+    match command {
+        "ls" => &[
+            ("-a", ["Include hidden entries", "Bao gồm mục ẩn"]),
+            (
+                "-d",
+                ["List directories themselves", "Liệt kê chính thư mục"],
+            ),
+            (
+                "-l",
+                [
+                    "Use a long listing",
+                    "Dùng danh sách với thông tin chi tiết",
+                ],
+            ),
+            ("-R", ["List subdirectories", "Liệt kê thư mục con"]),
+        ],
+        "grep" => &[
+            ("-i", ["Ignore case", "Bỏ qua chữ hoa và chữ thường"]),
+            ("-n", ["Show matching line numbers", "Hiện số dòng khớp"]),
+            (
+                "-F",
+                [
+                    "Treat patterns as literal strings",
+                    "Dùng mẫu dưới dạng chuỗi ký tự",
+                ],
+            ),
+            (
+                "-v",
+                ["Select nonmatching lines", "Chọn các dòng không khớp"],
+            ),
+        ],
+        "find" => &[
+            ("-name", ["Match by name", "Khớp theo tên"]),
+            ("-type", ["Match by file type", "Khớp theo loại tệp"]),
+            ("-print", ["Print matching paths", "In đường dẫn khớp"]),
+        ],
+        "cp" | "mv" | "rm" => &[INTERACTIVE],
+        "mkdir" => &[(
+            "-p",
+            [
+                "Create missing parent directories",
+                "Tạo thư mục cha còn thiếu",
+            ],
+        )],
+        "head" | "tail" => &[("-n", ["Set the number of lines", "Đặt số dòng"])],
+        "read" => &[
+            (
+                "-r",
+                [
+                    "Read backslashes literally",
+                    "Đọc dấu gạch chéo ngược nguyên văn",
+                ],
+            ),
+            ("-p", ["Display a prompt", "Hiện lời nhắc"]),
+            ("-t", ["Set the input timeout", "Đặt thời gian chờ đầu vào"]),
+        ],
+        "type" => &[("-a", ["Show all command matches", "Hiện mọi lệnh khớp"])],
         _ => &[],
     }
 }

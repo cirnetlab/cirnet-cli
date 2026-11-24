@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, path::PathBuf};
 
 use clap::ArgMatches;
 use crossterm::event::Event;
@@ -24,6 +24,7 @@ pub(super) struct RepositoryPrompt {
     worker: Option<Runner>,
     refresh: bool,
     focused: Option<String>,
+    native: Option<(PathBuf, Option<String>)>,
     animate: bool,
 }
 
@@ -38,6 +39,7 @@ impl RepositoryPrompt {
             worker: None,
             refresh: false,
             focused: None,
+            native: None,
             animate,
         }
     }
@@ -46,12 +48,22 @@ impl RepositoryPrompt {
         *history = self.menu.history;
     }
 
-    pub(super) fn open_on(&mut self, mut selectors: Vec<String>, focused: Option<String>) {
+    pub(super) fn open_on(
+        &mut self,
+        mut selectors: Vec<String>,
+        focused: Option<String>,
+        native: Option<(PathBuf, Option<String>)>,
+    ) {
         selectors.extend(crate::workspace::Repo::KEYS.into_iter().map(str::to_owned));
         let mut unique = std::collections::HashSet::new();
         selectors.retain(|value| unique.insert(value.clone()));
         self.menu.completer.set_repository_values(selectors);
         self.focused = focused;
+        self.menu.completer.set_native_context(
+            native.as_ref().map(|(path, _)| path.as_path()),
+            native.as_ref().and_then(|(_, shell)| shell.as_deref()),
+        );
+        self.native = native;
         // The repository panel has its own selection and search state. Only open a fresh editor.
         self.menu.open_prompt(Input::default());
     }
@@ -177,7 +189,13 @@ impl RepositoryPrompt {
             Effect::Native(line) => {
                 self.menu.begin_output(&[]);
                 self.menu.output.as_mut().expect("native output").title = None;
-                self.start(Runner::start_native(&line, vi, None));
+                let context = self.native.as_ref();
+                self.start(Runner::start_native(
+                    &line,
+                    vi,
+                    context.map(|(path, _)| path.as_path()),
+                    context.and_then(|(_, shell)| shell.as_deref()),
+                ));
                 PromptEvent::Redraw
             }
             Effect::Repositories(_) => {
@@ -240,7 +258,7 @@ mod tests {
         let mut history = History::default();
         history.record_cnl("status", &["status".into()]);
         let mut editor = RepositoryPrompt::new(false, &mut history);
-        editor.open_on(vec!["r:42".into()], Some("r:42".into()));
+        editor.open_on(vec!["r:42".into()], Some("r:42".into()), None);
         editor
             .event(key(KeyCode::Up), None, &workspace, &flags)
             .unwrap();
@@ -276,6 +294,67 @@ mod tests {
     }
 
     #[test]
+    fn focused_checkout_supplies_both_completion_and_native_command_directory() -> io::Result<()> {
+        let flags = crate::cli::app().get_matches_from(["cnl"]);
+        let checkout = std::env::current_dir()?;
+        let directory = checkout.join("src").join("tui");
+        assert!(directory.join("repository_prompt.rs").is_file());
+        let workspace = Workspace { root: checkout };
+        let (shell, query, execute) = if cfg!(windows) {
+            ("cmd", "type repository_pr", "cd")
+        } else {
+            ("bash", "cat repository_pr", "pwd")
+        };
+        let mut history = History::default();
+        let mut editor = RepositoryPrompt::new(false, &mut history);
+        editor.open_on(
+            vec![],
+            Some("focused".into()),
+            Some((directory.clone(), Some(shell.into()))),
+        );
+
+        editor.paste(query, false);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            editor.frame(Frame::new((100, 30)), false);
+            let prompt = editor.menu.prompt.as_ref().unwrap();
+            if prompt
+                .completions
+                .iter()
+                .any(|item| item.text == "repository_prompt.rs")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "{:?}",
+                prompt.completions
+            );
+            editor.poll()?;
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        editor.menu.open_prompt(Input::at_end(execute.into()));
+        assert!(matches!(
+            editor.event(key(KeyCode::Enter), None, &workspace, &flags)?,
+            PromptEvent::Redraw
+        ));
+        while editor.worker.is_some() {
+            assert!(std::time::Instant::now() < until);
+            editor.poll()?;
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let buffer = &mut editor.menu.output.as_mut().unwrap().buffer;
+        buffer.layout(8192);
+        let stdout = buffer.copy(buffer.row_range(0).unwrap()).unwrap().trim();
+        assert_eq!(
+            std::fs::canonicalize(stdout)?,
+            std::fs::canonicalize(directory)?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn completed_output_returns_to_the_command_field_before_the_dashboard() {
         let workspace = Workspace {
             root: std::env::temp_dir(),
@@ -283,7 +362,7 @@ mod tests {
         let flags = crate::cli::app().try_get_matches_from(["cnl"]).unwrap();
         let mut history = History::default();
         let mut editor = RepositoryPrompt::new(false, &mut history);
-        editor.open_on(vec![], None);
+        editor.open_on(vec![], None, None);
         editor.menu.begin_output(&["status".into()]);
         editor.menu.output.as_mut().unwrap().running = false;
         assert!(matches!(

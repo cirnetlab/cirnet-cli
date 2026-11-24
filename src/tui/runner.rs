@@ -12,7 +12,11 @@ use clap::ArgMatches;
 
 use super::viewport::Buffer;
 pub(super) use crate::process::sanitize_console_output as sanitize;
-use crate::{localization::terminal as labels, process::hidden, workspace::Workspace};
+use crate::{
+    localization::terminal as labels,
+    process::{ProcessJob, hidden},
+    workspace::Workspace,
+};
 
 const STREAM_LIMIT: usize = 128 * 1024;
 const LOG_FRAME_INTERVAL: Duration = Duration::from_millis(160);
@@ -196,13 +200,12 @@ impl Runner {
         line: &str,
         vi: bool,
         directory: Option<&std::path::Path>,
+        selected_shell: Option<&str>,
     ) -> Result<Self> {
-        let mut command =
-            crate::cli::native::line(line, |input| super::completion::arguments(input).ok())?;
+        let mut command = crate::cli::native::line(line, selected_shell, directory, vi, |input| {
+            super::completion::arguments(input).ok()
+        })?;
         command.env_remove("CNL_TUI_REPORT");
-        if let Some(path) = directory {
-            command.current_dir(path);
-        }
         Self::spawn(command, true, vi)
     }
 
@@ -335,77 +338,6 @@ impl Runner {
         self.cancelled = true;
         drop(job);
         Ok(())
-    }
-}
-
-#[cfg(windows)]
-pub(super) struct ProcessJob {
-    _handle: std::os::windows::io::OwnedHandle,
-}
-
-#[cfg(windows)]
-impl ProcessJob {
-    fn attach(child: &Child) -> Result<Self> {
-        use std::os::windows::io::AsRawHandle;
-        Self::attach_handle(child.as_raw_handle())
-    }
-
-    pub(super) fn attach_handle(child: std::os::windows::io::RawHandle) -> Result<Self> {
-        use std::{mem, os::windows::io::FromRawHandle, ptr};
-        use windows_sys::Win32::System::JobObjects::*;
-        let handle = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
-        if handle.is_null() {
-            return Err(io::Error::last_os_error().into());
-        }
-        // The newly created job handle was checked for null and has a single owner.
-        let guard = Self {
-            _handle: unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle) },
-        };
-        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if unsafe {
-            SetInformationJobObject(
-                handle,
-                JobObjectExtendedLimitInformation,
-                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                mem::size_of_val(&limits) as u32,
-            )
-        } == 0
-            || unsafe { AssignProcessToJobObject(handle, child) } == 0
-        {
-            return Err(io::Error::last_os_error().into());
-        }
-        Ok(guard)
-    }
-}
-
-#[cfg(unix)]
-struct ProcessJob(libc::pid_t);
-
-#[cfg(unix)]
-impl ProcessJob {
-    fn attach(child: &Child) -> Result<Self> {
-        Ok(Self(child.id().try_into()?))
-    }
-}
-
-#[cfg(unix)]
-impl Drop for ProcessJob {
-    fn drop(&mut self) {
-        // Cancellable children were started as leaders of their own process groups.
-        unsafe { libc::kill(-self.0, libc::SIGKILL) };
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-struct ProcessJob;
-#[cfg(not(any(unix, windows)))]
-impl ProcessJob {
-    fn attach(_: &Child) -> Result<Self> {
-        bail!(
-            "{}",
-            crate::localization::message(labels::CANCELLATION_WINDOWS_ONLY)
-        )
     }
 }
 

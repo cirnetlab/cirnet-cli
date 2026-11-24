@@ -68,7 +68,7 @@ Các ví dụ bên dưới dùng `cnl`. Nếu CLI chưa có trong PATH, dùng `&
 | `cnl status` | Xem đích, chế độ, dịch vụ do CLI quản lý, cổng thực tế và URL Interface của hồ sơ đã chọn. |
 | `cnl stop [--desktop interface] [--dry-run]` | Yêu cầu supervisor dừng phiên do hồ sơ đã chọn quản lý. Đích được chỉ định phải khớp với phiên đó. |
 | `cnl logs [--service native\|vite] [--lines N]` | Đọc phần cuối nhật ký runtime đang chạy hoặc gần nhất trong hồ sơ đã chọn. Mặc định đọc 60 dòng của `native`. |
-| `cnl shell [powershell\|cmd\|bash\|wsl]` | Mở shell native tương tác tại thư mục hiện tại. Mặc định dùng PowerShell trên Windows và Bash trên Linux. Trên Windows có thể chọn CMD hoặc WSL. |
+| `cnl shell [PROFILE]` | Mở shell tương tác tại thư mục hiện tại. Có thể chọn PowerShell 7, CMD, Bash native, Git Bash hoặc WSL Bash tùy nền tảng và môi trường đã cài. |
 | `cnl completion <powershell\|bash>` | Xuất script gợi ý lệnh cho shell qua stdout. |
 | `cnl verify [--receipt <RECEIPT>] [--browser-cache <ABSOLUTE_DIR>] [--dry-run]` | Kiểm chứng ứng viên đóng gói. Lệnh dùng Chromium đã cài trong hồ sơ nếu có. Chỉ định cache tương thích để chạy cả phần kiểm thử trình duyệt. |
 | `cnl verify --repo <KEY> [--repo <KEY> ...] [--receipt <RECEIPT>] [--fpga-toolchain <DIR>] [--dry-run]` | Kiểm tra các thành phần đã chọn. Interface dùng đầu vào từ ứng viên. Embedded chạy kiểm thử RTL với bộ công cụ đã ghim. |
@@ -106,7 +106,7 @@ Dùng `--yes` để xác nhận clone, thêm hoặc gỡ hàng loạt sau khi xe
 
 Bảng quản lý hiển thị nhánh, trạng thái Git, đường dẫn cục bộ và mã commit rút gọn. Mở Chi tiết để xem số commit đi trước và đi sau, hoặc mở Lịch sử để xem nhật ký commit. Dùng `/` để tìm, Space để chọn và `G` để lọc nhóm. Mở Chi tiết để xem đường dẫn đầy đủ hoặc nhấn `C` để sao chép đường dẫn của repo đang chọn. Dùng `A` để mở thao tác, kiểm tra danh sách rồi nhấn `Y` để xác nhận. Esc quay về màn hình trước.
 
-Nhấn `:` để mở ô lệnh CNL dùng chung lịch sử, gợi ý và điều khiển kết quả với terminal chính. Nhấn `T` để mở terminal của repo đang có tiêu điểm.
+Nhấn `:` để mở ô lệnh CNL cho checkout đang có tiêu điểm. Gợi ý và lệnh native dùng cùng thư mục checkout và shell ưu tiên của repo. Nhấn `T` để mở terminal của repo đang có tiêu điểm.
 
 Dùng thanh công cụ hoặc nhấn F1 để mở terminal. Bộ chọn tìm trong các kho mã cục bộ, ưu tiên kho vừa dùng trong lần chạy CNL hiện tại và liệt kê các shell đã cài. Bảng Phiên hiển thị shell và repo trên cùng một dòng, với biểu tượng terminal thẳng cột giữa các nhóm Split và phiên độc lập. Rê chuột lên dòng để hiện nút Chia terminal và Đóng terminal. Nút Chia dùng cho phiên độc lập. Đóng phiên đang chạy cần xác nhận. Nhấn F4 để lấy tiêu điểm hoặc ẩn bảng, / để lọc, ↑ hoặc ↓ để di chuyển và Enter để lấy tiêu điểm phiên. F6 và F7 chuyển phiên trực tiếp.
 
@@ -166,7 +166,11 @@ Rê chuột lên mục gợi ý để tô sáng. Bấm để chèn mục vào v�
 
 Nhập lệnh native trực tiếp, ví dụ `git status` hoặc `Get-ChildItem | Select-Object -First 5` trên Windows. Mỗi lệnh chạy trong tiến trình riêng. Dùng `cnl shell` nếu cần giữ thay đổi thư mục làm việc hoặc biến môi trường qua nhiều lệnh native. Nhập `exit` trong shell để trở lại TUI.
 
-TUI gợi ý nhánh Git cục bộ, các tùy chọn Git và shell phổ biến, cùng đường dẫn khi ngữ cảnh hỗ trợ. Trên Windows, ngữ cảnh mặc định theo PowerShell. Nhập tiền tố `cmd /c` hoặc `wsl --exec` để nhận gợi ý lệnh CMD hoặc Bash. Trên Linux, ngữ cảnh mặc định là Bash. Gợi ý dùng dữ liệu cục bộ có giới hạn.
+Bảng gợi ý kết hợp cú pháp CNL với dữ liệu tra cứu nền có giới hạn. Git gợi ý lệnh và tùy chọn tích hợp trong bản đã cài, nhánh cục bộ, nhánh theo dõi từ xa, tag, remote, stash, worktree, khóa cấu hình và đường dẫn tùy theo đối số. PowerShell gợi ý cmdlet, bí danh, tham số và giá trị liệt kê từ nguồn tin cậy. CMD và Bash kết hợp lệnh tích hợp, tệp thực thi tìm thấy và các tùy chọn phổ biến. Dùng phím mũi tên hoặc Tab để duyệt thêm gợi ý ngoài vùng hiển thị.
+
+Hồ sơ của repo đang hoạt động cung cấp shell và thư mục làm việc. Windows mặc định dùng PowerShell 7 và có thể chuyển sang CMD nếu cần. Linux mặc định dùng Bash. Dùng `cmd /c` hoặc `wsl --exec` để đổi cú pháp gợi ý cho một lệnh. Ô lệnh CNL gợi ý bản phân phối WSL đã đăng ký và cú pháp Linux phổ biến. Trong Terminal WSL đang chạy, Bash tra cứu lệnh, đường dẫn và người dùng của bản phân phối đó.
+
+Dùng `cnl shell git-bash` để mở Git Bash trên Windows, `cnl shell bash` trên Linux, hoặc `cnl shell "wsl:Ubuntu 24.04"` để mở bản phân phối WSL đã cài. Hồ sơ `wsl` mở bản phân phối mặc định. Dùng cùng tên hồ sơ với `cnl repos terminal <REPO> --shell PROFILE` hoặc lưu vào cấu hình bằng `cnl repos config <REPO> --shell PROFILE`. Git Bash dùng môi trường MSYS. Mỗi Terminal tích hợp giữ shell riêng và xử lý Tab bằng chính shell đó, kể cả sau khi chia hoặc nhân bản phiên.
 
 Để dùng lại lịch sử lệnh CNL đủ điều kiện sau khi khởi động lại, chạy `cnl tui --persist-history`. Khi thoát terminal, CLI lưu tối đa 100 lệnh đủ điều kiện trong `tui-history.json` của hồ sơ đang chọn. Lệnh native an toàn có thể gọi lại trong phiên. Lịch sử lưu trên đĩa loại bỏ đối số tùy ý, đường dẫn và thông tin xác thực.
 
