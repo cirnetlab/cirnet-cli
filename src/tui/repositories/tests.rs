@@ -44,6 +44,55 @@ fn populated() -> Dashboard {
 }
 
 #[test]
+fn footer_never_uses_local_row_count_as_the_github_total() {
+    let mut dashboard = Dashboard::new(false, false);
+    dashboard.replace_rows((0..33).map(row).collect());
+    dashboard.loading = false;
+    dashboard.catalog_loading = false;
+    assert!(
+        dashboard
+            .frame((110, 24))
+            .rows
+            .iter()
+            .any(|line| { line.contents().contains("?/? repos · GitHub unavailable") })
+    );
+}
+
+#[test]
+fn footer_keeps_organization_counts_across_filters_selections_and_refresh() {
+    let mut dashboard = Dashboard::new(false, false);
+    dashboard.replace_rows((0..35).map(row).collect());
+    dashboard.counts = Some(RepositoryCounts {
+        local: 33,
+        remote: 34,
+        fresh: true,
+    });
+    let assert_footer = |dashboard: &mut Dashboard, expected: &str| {
+        assert!(
+            dashboard
+                .frame((110, 24))
+                .rows
+                .iter()
+                .any(|line| line.contents().contains(expected)),
+            "{expected}"
+        );
+    };
+    assert_footer(&mut dashboard, "33/34 repos · GitHub loading");
+    dashboard.catalog_loading = false;
+    dashboard.loading = false;
+    assert_footer(&mut dashboard, "33/34 repos · GitHub fresh · 0 selected");
+    dashboard.toggle(0);
+    dashboard.filters.group = Some("Odd".into());
+    dashboard.search = Input::at_end("unknown text".into());
+    dashboard.refilter();
+    assert!(dashboard.visible.is_empty());
+    assert_footer(&mut dashboard, "33/34 repos · GitHub fresh · 1 selected");
+
+    dashboard.counts.as_mut().unwrap().fresh = false;
+    assert_footer(&mut dashboard, "33/34 repos · GitHub cached · 1 selected");
+}
+
+#[test]
 fn filters_are_incremental_and_keep_checked_repositories_outside_the_view() {
     let mut dashboard = populated();
     dashboard.toggle(0);

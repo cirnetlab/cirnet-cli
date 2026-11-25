@@ -81,6 +81,8 @@ The workspace registry lives outside Git in the state directory. Use a GitHub `o
 
 GitHub discovery uses `gh` signed in to `github.com`. It paginates repositories visible to that account and keeps a timestamped workspace cache. Use `--refresh` to update the cache or `--offline` to read it without contacting GitHub. Cloning and fetching use Git credentials with access to the selected repository.
 
+Repository Manager refreshes a missing or day-old GitHub catalog in the background when opened. Press F5 for a manual refresh, or open it with `cnl repos --offline` to use the cache only. The footer shows distinct verified local organization repositories over the accessible GitHub total. GitHub repository IDs let the manager recognize verified redirects left by a repository rename. The footer identifies freshly fetched, cached, and loading data, and shows `?/?` when the total is unavailable. Search, groups, selections, and extra worktrees do not change these counts.
+
 ```powershell
 cnl repos discover --refresh
 cnl repos add --all --root . --dry-run

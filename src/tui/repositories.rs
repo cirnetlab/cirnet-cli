@@ -37,7 +37,10 @@ use super::{
 };
 use crate::{
     environment::write_json,
-    repositories::{Row, group_names, registry_directory, snapshot, terminal_context},
+    repositories::{
+        CatalogMode, DashboardInventory, RepositoryCounts, Row, dashboard_inventory, group_names,
+        registry_directory, terminal_context,
+    },
     workspace::Workspace,
 };
 
@@ -119,6 +122,8 @@ struct Dashboard {
     output: Option<OutputView>,
     notice: String,
     loading: bool,
+    catalog_loading: bool,
+    counts: Option<RepositoryCounts>,
 }
 
 impl Dashboard {
@@ -146,6 +151,8 @@ impl Dashboard {
             output: None,
             notice: String::new(),
             loading: true,
+            catalog_loading: true,
+            counts: None,
         }
     }
 
@@ -701,20 +708,35 @@ impl Dashboard {
 type TerminalContext = (String, PathBuf, Option<String>);
 
 struct Snapshot {
-    rows: Vec<Row>,
+    inventory: DashboardInventory,
     groups: Vec<String>,
     settings: Option<(PathBuf, Filters)>,
 }
 
-fn scan(workspace: &Workspace, flags: &ArgMatches, load: bool) -> JoinHandle<Result<Snapshot>> {
+fn scan(
+    workspace: &Workspace,
+    flags: &ArgMatches,
+    load: bool,
+    mode: CatalogMode,
+) -> JoinHandle<Result<Snapshot>> {
     let workspace = Workspace {
         root: workspace.root.clone(),
     };
     let flags = flags.clone();
     thread::spawn(move || {
-        let rows = snapshot(&workspace, &flags)?;
+        crate::localization::set_language(
+            flags
+                .get_one::<String>("lang")
+                .is_some_and(|lang| lang == "vi"),
+        );
+        let inventory = dashboard_inventory(&workspace, &flags, mode)?;
         let mut groups = group_names(&workspace, &flags)?;
-        groups.extend(rows.iter().flat_map(|row| row.groups.iter().cloned()));
+        groups.extend(
+            inventory
+                .rows
+                .iter()
+                .flat_map(|row| row.groups.iter().cloned()),
+        );
         groups.sort();
         groups.dedup();
         let settings = if load {
@@ -728,7 +750,7 @@ fn scan(workspace: &Workspace, flags: &ArgMatches, load: bool) -> JoinHandle<Res
             None
         };
         Ok(Snapshot {
-            rows,
+            inventory,
             groups,
             settings,
         })
@@ -749,6 +771,7 @@ pub(super) fn open(
     workspace: &Workspace,
     flags: &ArgMatches,
     update: bool,
+    offline: bool,
     sessions: &mut Manager,
     vi: bool,
     history: &mut History,
@@ -764,7 +787,7 @@ pub(super) fn open(
         );
     }
     let mut prompt = RepositoryPrompt::new(vi, history);
-    let result = drive(workspace, flags, update, sessions, vi, &mut prompt);
+    let result = drive(workspace, flags, update, offline, sessions, vi, &mut prompt);
     prompt.finish(history);
     result
 }
@@ -773,6 +796,7 @@ fn drive(
     workspace: &Workspace,
     flags: &ArgMatches,
     update: bool,
+    offline: bool,
     sessions: &mut Manager,
     vi: bool,
     prompt: &mut RepositoryPrompt,
@@ -782,8 +806,14 @@ fn drive(
         .subcommand_matches("repos")
         .and_then(|matches| matches.subcommand_matches("update"))
         .and_then(|matches| matches.get_one::<u8>("jobs").copied());
-    let mut scanner = Some(scan(workspace, flags, true));
+    let initial_mode = if offline {
+        CatalogMode::Cached
+    } else {
+        CatalogMode::Automatic
+    };
+    let mut scanner = Some(scan(workspace, flags, true, initial_mode));
     let mut refresh_pending = false;
+    let mut refresh_catalog = false;
     let mut context: Option<JoinHandle<Result<TerminalContext>>> = None;
     let mut settings = None;
     let mut running: Option<(Runner, Action)> = None;
@@ -804,6 +834,7 @@ fn drive(
                 )
             })?;
             dashboard.loading = false;
+            dashboard.catalog_loading = false;
             match result {
                 Ok(snapshot) => {
                     dashboard.groups = snapshot.groups;
@@ -828,7 +859,13 @@ fn drive(
                     {
                         dashboard.filters.group = None;
                     }
-                    dashboard.replace_rows(snapshot.rows);
+                    dashboard.counts = snapshot.inventory.counts;
+                    if let Some(error) = snapshot.inventory.discovery_error
+                        && dashboard.notice.is_empty()
+                    {
+                        dashboard.notice = error[usize::from(vi)].to_owned();
+                    }
+                    dashboard.replace_rows(snapshot.inventory.rows);
                 }
                 Err(error) => dashboard.notice = format!("{error:#}"),
             }
@@ -895,7 +932,13 @@ fn drive(
         if refresh_pending && scanner.is_none() {
             refresh_pending = false;
             dashboard.loading = true;
-            scanner = Some(scan(workspace, flags, false));
+            dashboard.catalog_loading = std::mem::take(&mut refresh_catalog);
+            let mode = if dashboard.catalog_loading {
+                CatalogMode::Refresh
+            } else {
+                CatalogMode::Cached
+            };
+            scanner = Some(scan(workspace, flags, false, mode));
             redraw = true;
         }
         redraw |= prompt.poll()?;
@@ -998,6 +1041,7 @@ fn drive(
                     if scanner.is_none() {
                         dashboard.notice.clear();
                         refresh_pending = true;
+                        refresh_catalog = !offline;
                     }
                 }
                 Effect::Run { args, action } => {

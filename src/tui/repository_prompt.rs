@@ -198,7 +198,7 @@ impl RepositoryPrompt {
                 ));
                 PromptEvent::Redraw
             }
-            Effect::Repositories(_) => {
+            Effect::Repositories { .. } => {
                 self.context_hint();
                 PromptEvent::Redraw
             }

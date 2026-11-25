@@ -236,7 +236,7 @@ enum Effect {
     Redraw,
     Run(Vec<String>),
     Native(String),
-    Repositories(bool),
+    Repositories { update: bool, offline: bool },
     RepositoryTerminal(String, Option<String>),
     Cancel,
     Exit,
@@ -332,7 +332,10 @@ impl Menu {
         }
         if entry.command == "repos" {
             self.close_main_prompt();
-            return Effect::Repositories(false);
+            return Effect::Repositories {
+                update: false,
+                offline: false,
+            };
         }
         let input = Input::at_end(format!("{} ", entry.command));
         self.open_prompt(input);
@@ -1265,14 +1268,15 @@ fn show(
                     }
                     redraw = true;
                 }
-                effect @ (Effect::Repositories(_) | Effect::RepositoryTerminal(_, _)) => {
+                effect @ (Effect::Repositories { .. } | Effect::RepositoryTerminal(_, _)) => {
                     drop(screen);
                     let localized = flags.clone();
                     let result = match effect {
-                        Effect::Repositories(update) => repositories::open(
+                        Effect::Repositories { update, offline } => repositories::open(
                             workspace,
                             &localized,
                             update,
+                            offline,
                             &mut sessions,
                             menu.vi,
                             &mut menu.history,
@@ -1361,7 +1365,10 @@ fn repository_view_request(args: &[String]) -> Option<Effect> {
     }
     let repos = matches.subcommand_matches("repos")?;
     if let Some(update) = management::wants_dashboard(repos) {
-        return Some(Effect::Repositories(update));
+        return Some(Effect::Repositories {
+            update,
+            offline: repos.get_flag("offline"),
+        });
     }
     let terminal = repos.subcommand_matches("terminal")?;
     Some(Effect::RepositoryTerminal(
@@ -1378,11 +1385,15 @@ pub(crate) fn open_repositories(
     let vi = flags
         .get_one::<String>("lang")
         .is_some_and(|lang| lang == "vi");
+    let offline = flags
+        .subcommand_matches("repos")
+        .is_some_and(|repos| repos.get_flag("offline"));
     let (mut history, state) = load_history(workspace, flags)?;
     let result = repositories::open(
         workspace,
         flags,
         update,
+        offline,
         &mut sessions::Manager::default(),
         vi,
         &mut history,

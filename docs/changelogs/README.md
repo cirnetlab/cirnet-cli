@@ -18,6 +18,7 @@
 - Add local Git and native shell suggestions, responsive layouts and a reduced-motion-aware input border.
 - Soften the copper input border sweep and pause its motion while editing.
 - Add a workspace repository registry, cached GitHub discovery, parallel Git synchronization, and a dashboard with persistent repository terminals.
+- Refresh the Repository Manager's GitHub catalog in the background and show distinct local organization checkouts over the accessible remote total.
 - Show verified Git metadata and readable paths in Repository Manager. Add hierarchical navigation, shared CNL command entry, and a split terminal workspace with a session list.
 - Widen Local path by removing the ahead and behind column from the repository table.
 - Tighten the Git status and Branch spacing, widen Local path, and remove the path tooltip and horizontal scrolling from the repository table.
@@ -37,6 +38,7 @@
 
 ### Tiếng Việt
 
+- Làm mới danh mục GitHub của Trình quản lý repo ở chế độ nền và hiển thị số repo riêng biệt đã checkout cục bộ trên tổng số repo có thể truy cập.
 - Thêm terminal CIRNETLAB và các lệnh kiểm tra công cụ, quản lý repo, build ứng viên, vận hành và kiểm chứng trên Windows x64.
 - Dùng launcher Remote để giám sát hệ thống native. Bổ sung tiến trình Vite do CLI quản lý để phát triển giao diện.
 - Chuyển thể menu CNR, chữ nổi màu cam và bộ vẽ cập nhật từng vùng. Bổ sung trình nhập song ngữ, gợi ý lệnh và kết quả trực tiếp có giới hạn.

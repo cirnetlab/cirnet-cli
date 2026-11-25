@@ -789,18 +789,25 @@ impl Dashboard {
     fn table_footer(&self, frame: &mut Frame, layout: &Layout, hits: &mut TableHits) {
         let Some(y) = layout.shortcuts else { return };
         let vi = self.vi;
+        let totals = self.counts.map_or_else(
+            || "?/?".to_owned(),
+            |counts| format!("{}/{}", counts.local, counts.remote),
+        );
+        let source = match (self.catalog_loading, self.counts) {
+            (true, _) => tr(vi, "loading", "đang tải"),
+            (false, Some(counts)) if counts.fresh => tr(vi, "fresh", "vừa tải"),
+            (false, Some(_)) => tr(vi, "cached", "từ cache"),
+            (false, None) => tr(vi, "unavailable", "không khả dụng"),
+        };
         let full = format!(
-            "{}/{} {} · {} {}",
-            self.visible.len(),
-            self.rows.len(),
+            "{totals} {} · GitHub {source} · {} {}",
             tr(vi, "repos", "kho mã"),
             self.checked.len(),
             tr(vi, "selected", "đã chọn")
         );
         let compact = format!(
-            "{}/{} · {}✓",
-            self.visible.len(),
-            self.rows.len(),
+            "{totals} {} · {source} · {}✓",
+            tr(vi, "repos", "kho mã"),
             self.checked.len()
         );
         let count = if layout.width >= 78 { full } else { compact };

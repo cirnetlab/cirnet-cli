@@ -81,6 +81,8 @@ Danh bạ của workspace nằm trong thư mục trạng thái ngoài Git. Chọ
 
 Tính năng khám phá GitHub dùng `gh` đã đăng nhập vào `github.com`. CLI đọc tất cả các trang repo mà tài khoản có quyền xem và lưu thời điểm làm mới danh mục theo workspace. Dùng `--refresh` để làm mới hoặc `--offline` để đọc cache ngoại tuyến. Clone và fetch dùng thông tin xác thực Git có quyền truy cập repo đã chọn.
 
+Khi mở, Trình quản lý repo làm mới danh mục GitHub ở chế độ nền nếu chưa có danh mục hoặc cache đã quá một ngày. Nhấn F5 để làm mới thủ công, hoặc mở bằng `cnl repos --offline` để chỉ dùng cache. Bộ đếm hiển thị số repo riêng biệt của tổ chức đã xác minh cục bộ trên tổng số repo GitHub có thể truy cập. Công cụ dùng ID repo GitHub để xác minh các đường dẫn chuyển hướng sau khi repo đổi tên. Giao diện phân biệt dữ liệu vừa tải, từ cache và đang tải, đồng thời hiển thị `?/?` khi chưa xác định được tổng số. Tìm kiếm, lọc nhóm, chọn repo và worktree bổ sung không ảnh hưởng đến bộ đếm.
+
 ```powershell
 cnl repos discover --refresh
 cnl repos add --all --root . --dry-run

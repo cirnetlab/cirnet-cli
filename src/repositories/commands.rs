@@ -45,7 +45,10 @@ pub(crate) fn command() -> Command {
                 .default_value("3"),
         )
     };
-    Command::new("repos").subcommands([
+    let repos = Command::new("repos")
+        .arg(flag("offline"))
+        .args_conflicts_with_subcommands(true);
+    repos.subcommands([
         Command::new("list"),
         Command::new("discover").args([
             root(),

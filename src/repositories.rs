@@ -1,4 +1,6 @@
 mod cancel;
+#[cfg(test)]
+mod catalog_tests;
 mod commands;
 mod git;
 mod github;
@@ -258,22 +260,66 @@ fn read_catalog(store: &Store) -> Result<Option<Catalog>> {
     Ok(cached)
 }
 
-fn catalog(
-    store: &Store,
-    offline: bool,
-    refresh: bool,
-) -> Result<(Option<Catalog>, Option<github::Failure>)> {
-    let cached = read_catalog(store)?;
-    if offline || (!refresh && cached.is_some()) {
-        return Ok((cached, None));
+#[derive(Clone, Copy)]
+pub(crate) enum CatalogMode {
+    Cached,
+    Automatic,
+    Refresh,
+}
+
+impl CatalogMode {
+    fn from_flags(offline: bool, refresh: bool) -> Self {
+        if offline {
+            Self::Cached
+        } else if refresh {
+            Self::Refresh
+        } else {
+            Self::Automatic
+        }
     }
-    match github::fetch() {
+}
+
+struct CatalogRead {
+    catalog: Option<Catalog>,
+    error: Option<github::Failure>,
+    refreshed: bool,
+}
+
+fn catalog(store: &Store, mode: CatalogMode) -> Result<CatalogRead> {
+    catalog_with(store, mode, github::fetch)
+}
+
+fn catalog_with(
+    store: &Store,
+    mode: CatalogMode,
+    fetch: impl FnOnce() -> std::result::Result<Catalog, github::Failure>,
+) -> Result<CatalogRead> {
+    let cached = read_catalog(store)?;
+    if matches!(mode, CatalogMode::Cached)
+        || matches!(mode, CatalogMode::Automatic)
+            && cached.as_ref().is_some_and(|catalog| !catalog.stale())
+    {
+        return Ok(CatalogRead {
+            catalog: cached,
+            error: None,
+            refreshed: false,
+        });
+    }
+    match fetch() {
         Ok(catalog) => {
             let _lock = store.lock()?;
             store.write(github::CACHE, &catalog)?;
-            Ok((Some(catalog), None))
+            Ok(CatalogRead {
+                catalog: Some(catalog),
+                error: None,
+                refreshed: true,
+            })
         }
-        Err(problem) => Ok((cached, Some(problem))),
+        Err(problem) => Ok(CatalogRead {
+            catalog: cached,
+            error: Some(problem),
+            refreshed: false,
+        }),
     }
 }
 
@@ -384,13 +430,78 @@ pub(crate) fn snapshot(workspace: &Workspace, args: &ArgMatches) -> Result<Vec<R
     rows(workspace, &registry, cached.as_ref(), &workspace.root)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct RepositoryCounts {
+    pub local: usize,
+    pub remote: usize,
+    pub fresh: bool,
+}
+
+pub(crate) struct DashboardInventory {
+    pub rows: Vec<Row>,
+    pub counts: Option<RepositoryCounts>,
+    pub discovery_error: Option<localization::Localized>,
+}
+
+pub(crate) fn dashboard_inventory(
+    workspace: &Workspace,
+    args: &ArgMatches,
+    mode: CatalogMode,
+) -> Result<DashboardInventory> {
+    let store = store(workspace, args)?;
+    let registry = store.load()?;
+    let CatalogRead {
+        catalog,
+        error,
+        refreshed,
+    } = catalog(&store, mode)?;
+    let (rows, local, aliases) = inventory::scan(
+        workspace,
+        &registry,
+        catalog.as_ref(),
+        &workspace.root,
+        |catalog, slugs| {
+            if matches!(mode, CatalogMode::Cached) || error.is_some() {
+                github::Aliases::new()
+            } else {
+                github::resolve_aliases(catalog, slugs)
+            }
+        },
+    )?;
+    if !aliases.is_empty() {
+        let _lock = store.lock()?;
+        if let Some(mut stored) = read_catalog(&store)?
+            && catalog
+                .as_ref()
+                .is_some_and(|catalog| catalog.refreshed == stored.refreshed)
+        {
+            stored.aliases.extend(aliases);
+            if stored.valid() {
+                store.write(github::CACHE, &stored)?;
+            }
+        }
+    }
+    Ok(DashboardInventory {
+        rows,
+        counts: catalog.as_ref().map(|catalog| RepositoryCounts {
+            local,
+            remote: catalog.repositories.len(),
+            fresh: refreshed,
+        }),
+        discovery_error: error.map(github::Failure::message),
+    })
+}
+
 fn rows(
     workspace: &Workspace,
     registry: &Registry,
     catalog: Option<&Catalog>,
     root: &Path,
 ) -> Result<Vec<Row>> {
-    inventory::rows(workspace, registry, catalog, root)
+    Ok(inventory::scan(workspace, registry, catalog, root, |_, _| {
+        github::Aliases::new()
+    })?
+    .0)
 }
 
 fn names(args: &ArgMatches) -> Vec<String> {
@@ -669,10 +780,16 @@ fn clone(
         && known
             .iter()
             .all(|(name, id)| id.is_none() && Repo::KEYS.contains(&name.as_str()));
-    let (catalog, remote_error) = catalog(
+    let CatalogRead {
+        catalog,
+        error: remote_error,
+        ..
+    } = catalog(
         store,
-        args.get_flag("offline") || native_only,
-        args.get_flag("refresh"),
+        CatalogMode::from_flags(
+            args.get_flag("offline") || native_only,
+            args.get_flag("refresh"),
+        ),
     )?;
     if args.get_flag("all") && catalog.is_none() {
         if dry {
@@ -789,7 +906,10 @@ fn clone(
 }
 
 fn register(store: &Store, args: &ArgMatches) -> Result<Value> {
-    let (catalog, error) = catalog(store, args.get_flag("offline"), args.get_flag("refresh"))?;
+    let CatalogRead { catalog, error, .. } = catalog(
+        store,
+        CatalogMode::from_flags(args.get_flag("offline"), args.get_flag("refresh")),
+    )?;
     let value = named(args);
     let remote = catalog
         .as_ref()
@@ -1104,7 +1224,10 @@ pub(crate) fn execute(
         "discover" => {
             let root = configured_root(workspace, options)?;
             let offline = options.get_flag("offline");
-            let (catalog, error) = catalog(&store, offline, options.get_flag("refresh"))?;
+            let CatalogRead { catalog, error, .. } = catalog(
+                &store,
+                CatalogMode::from_flags(offline, options.get_flag("refresh")),
+            )?;
             let mut rows = rows(workspace, &registry, catalog.as_ref(), &root)?;
             if let Some(query) = options.get_one::<String>("query") {
                 let query = query.to_lowercase();

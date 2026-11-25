@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
     thread,
@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Result, ensure};
 
+use super::github::Aliases;
 use super::{
     Catalog, Checkout, Record, Registry, Remote, Row, git, msg, record_row, registry::path_key,
     remote_row,
@@ -19,16 +20,27 @@ struct CatalogIndex<'a> {
 }
 
 impl<'a> CatalogIndex<'a> {
-    fn new(catalog: Option<&'a Catalog>) -> Self {
+    fn new(catalog: Option<&'a Catalog>, aliases: Aliases) -> Self {
         let repositories = catalog
             .into_iter()
             .flat_map(|catalog| &catalog.repositories);
-        Self {
+        let mut index = Self {
             ids: repositories.clone().map(|repo| (repo.id, repo)).collect(),
             slugs: repositories
                 .map(|repo| (repo.slug.to_ascii_lowercase(), repo))
                 .collect(),
+        };
+        for (slug, id) in catalog
+            .into_iter()
+            .flat_map(|catalog| catalog.aliases.iter())
+            .map(|(slug, id)| (slug.clone(), *id))
+            .chain(aliases)
+        {
+            if let Some(repo) = id.and_then(|id| index.ids.get(&id)) {
+                index.slugs.insert(slug, repo);
+            }
         }
+        index
     }
 
     fn for_record(&self, record: &Record) -> Option<&'a Remote> {
@@ -65,7 +77,10 @@ pub(super) fn verify_record(
             .zip(actual.map(|remote| remote.id))
             .is_none_or(|(saved, actual)| saved == actual)
             && ((record.slug.is_none() && catalog.is_none())
-                || represents_slug(record, catalog, checkout.slug.as_deref())),
+                || represents_slug(record, catalog, checkout.slug.as_deref())
+                || catalog
+                    .zip(actual)
+                    .is_some_and(|(saved, live)| saved.id == live.id)),
         "{}",
         msg::get(msg::IDENTITY_CHANGED)
     );
@@ -76,15 +91,10 @@ pub(super) fn record_remote<'a>(
     catalog: Option<&'a Catalog>,
     record: &Record,
 ) -> Option<&'a Remote> {
-    let repositories = &catalog?.repositories;
+    let catalog = catalog?;
     match record.github_id {
-        Some(id) => repositories.iter().find(|repo| repo.id == id),
-        None => repositories.iter().find(|repo| {
-            record
-                .slug
-                .as_deref()
-                .is_some_and(|slug| repo.slug.eq_ignore_ascii_case(slug))
-        }),
+        Some(id) => catalog.repositories.iter().find(|repo| repo.id == id),
+        None => catalog.by_slug(record.slug.as_deref()?),
     }
 }
 
@@ -92,11 +102,7 @@ pub(super) fn checkout_remote<'a>(
     catalog: Option<&'a Catalog>,
     checkout: &Checkout,
 ) -> Option<&'a Remote> {
-    let slug = checkout.slug.as_deref()?;
-    catalog?
-        .repositories
-        .iter()
-        .find(|remote| remote.slug.eq_ignore_ascii_case(slug))
+    catalog?.by_slug(checkout.slug.as_deref()?)
 }
 
 enum Source<'a> {
@@ -154,14 +160,15 @@ fn decorate(row: &mut Row, remote: &Remote) {
     }
 }
 
-pub(super) fn rows(
+pub(super) fn scan(
     workspace: &Workspace,
     registry: &Registry,
     catalog: Option<&Catalog>,
     root: &Path,
-) -> Result<Vec<Row>> {
-    let remotes = CatalogIndex::new(catalog);
+    resolve_aliases: impl FnOnce(&Catalog, BTreeSet<String>) -> Aliases,
+) -> Result<(Vec<Row>, usize, Aliases)> {
     let mut represented = HashSet::new();
+    let mut local_matches_by_id = HashSet::new();
     let mut records = Vec::with_capacity(registry.records.len());
     let mut candidates = Vec::new();
     let mut paths = HashSet::new();
@@ -188,12 +195,7 @@ pub(super) fn rows(
                 source: Source::Record(record, records.len()),
             });
         }
-        let mut row = record_row(record, active);
-        if let Some(remote) = remotes.for_record(record) {
-            decorate(&mut row, remote);
-            represented.insert(remote.id);
-        }
-        records.push((record, row));
+        records.push((record, record_row(record, active)));
     }
 
     // The workspace is not itself registered merely by viewing it.
@@ -210,6 +212,25 @@ pub(super) fn rows(
 
     let mut discovered = Vec::new();
     let inspections = inspect(&candidates);
+    let aliases = catalog.map_or_else(Aliases::new, |catalog| {
+        let slugs = inspections
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .filter_map(|checkout| checkout.slug.as_deref())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        resolve_aliases(catalog, slugs)
+    });
+    let remotes = CatalogIndex::new(catalog, aliases.clone());
+    for (record, row) in &mut records {
+        if let Some(remote) = remotes.for_record(record) {
+            decorate(row, remote);
+            if row.path.is_none() {
+                row.state = "available".into();
+            }
+            represented.insert(remote.id);
+        }
+    }
     for (candidate, result) in candidates.into_iter().zip(inspections) {
         let Candidate { path, source } = candidate;
         let failure = |error: &anyhow::Error| git::failure_state(&path, error).to_owned();
@@ -227,6 +248,7 @@ pub(super) fn rows(
                         if let Some(remote) = known.or(actual) {
                             decorate(row, remote);
                             represented.insert(remote.id);
+                            local_matches_by_id.insert(remote.id);
                         }
                     }
                     Err(error) => row.state = failure(&error),
@@ -246,6 +268,7 @@ pub(super) fn rows(
                         if let Some(remote) = catalog {
                             decorate(&mut row, remote);
                             represented.insert(remote.id);
+                            local_matches_by_id.insert(remote.id);
                         }
                     }
                     Err(error) => {
@@ -267,6 +290,9 @@ pub(super) fn rows(
         .filter_map(|(i, row)| Some((i, row.as_ref()?)))
     {
         if let (Some(remote), Some(slug)) = (&row.remote_name, &row.remote) {
+            let slug = remotes
+                .for_slug(Some(slug))
+                .map_or(slug.as_str(), |repo| repo.slug.as_str());
             local_matches
                 .entry((remote, slug.to_ascii_lowercase()))
                 .or_default()
@@ -279,7 +305,11 @@ pub(super) fn rows(
             if row.path.is_some() {
                 return None;
             }
-            let saved = record.slug.as_deref();
+            let saved = record.slug.as_deref().map(|slug| {
+                remotes
+                    .for_slug(Some(slug))
+                    .map_or(slug, |repo| repo.slug.as_str())
+            });
             let current = remotes.for_record(record).map(|repo| repo.slug.as_str());
             let mut indices = saved
                 .into_iter()
@@ -340,5 +370,5 @@ pub(super) fn rows(
             .map(remote_row),
     );
     rows.sort_by_cached_key(|row| (row.name.to_lowercase(), row.selector.clone()));
-    Ok(rows)
+    Ok((rows, local_matches_by_id.len(), aliases))
 }
