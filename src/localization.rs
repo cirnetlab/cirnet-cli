@@ -566,7 +566,7 @@ messages! {
     RUNTIME_PLATFORM => "CIRNETLAB native runtime requires Windows x64", "Runtime native CIRNETLAB yêu cầu Windows x64";
     RUNTIME_ALREADY_OWNED => "This profile already owns a running process. Inspect cnl status before starting again.", "Hồ sơ này đang quản lý một tiến trình. Xem cnl status trước khi khởi động lại.";
     RUNTIME_EXITED_UNCONFIRMED => "The previous instance exited without a confirmed cnl stop. Inspect", "Phiên trước đã thoát trước khi xác nhận cnl stop. Hãy kiểm tra";
-    RUNTIME_EXITED_GUIDANCE => "Use a different profile until shutdown is resolved", "Dùng hồ sơ khác cho đến khi xử lý xong việc dừng phiên";
+    RUNTIME_EXITED_GUIDANCE => "Inspect cnl status and cnl logs --service native for this profile. If shutdown was interrupted, restart Windows and retry cnl stop --desktop interface. Keep the runtime records for diagnosis if Stop still reports an error.", "Xem cnl status và cnl logs --service native của hồ sơ này. Nếu quá trình dừng bị gián đoạn, hãy khởi động lại Windows rồi thử lại cnl stop --desktop interface. Giữ hồ sơ runtime để chẩn đoán nếu Stop vẫn báo lỗi.";
     SQLITE_MISSING => "No initialized SQLite database in", "Chưa có cơ sở dữ liệu SQLite đã khởi tạo trong";
     SQLITE_INITIALIZE => "Use --initialize-db to create a fresh database", "Dùng --initialize-db để tạo cơ sở dữ liệu mới";
     NATIVE_READINESS_FAILED => "Native application failed HTTP, WebSocket, Interface or Hardware RPC readiness", "Ứng dụng native chưa sẵn sàng ở HTTP, WebSocket, Interface hoặc Hardware RPC";
@@ -575,7 +575,10 @@ messages! {
     BROWSER_OPEN_GUIDANCE => "Open in your browser", "Mở bằng trình duyệt";
     VITE_CLEANUP_MISSING => "Vite exited without a cleanup receipt", "Vite đã thoát khi chưa có biên nhận dọn dẹp";
     VITE_CLEANUP => "Vite cleanup", "Dọn dẹp Vite";
-    NATIVE_SHUTDOWN_UNCONFIRMED => "The owned supervisor already exited. Clean native shutdown cannot be confirmed.", "Supervisor thuộc CLI đã thoát. Không thể xác nhận hệ thống native đã dừng an toàn.";
+    RUNTIME_NATIVE_LOCK => "Cannot acquire the native data directory lock.", "Không thể lấy khóa thư mục dữ liệu native.";
+    RUNTIME_STOP_PENDING => "The native launcher still has a pending Stop request.", "Launcher native vẫn còn yêu cầu Stop đang chờ.";
+    RUNTIME_RESULT_UNCLEAN => "The launcher did not record a clean shutdown for this run.", "Launcher chưa ghi nhận lần chạy này đã dừng an toàn.";
+    RUNTIME_REBOOT_UNCONFIRMED => "No verified Windows restart after this run was found.", "Không tìm thấy lần khởi động lại Windows đã được xác minh sau phiên này.";
     STOP_LAUNCHER_CHANGED => "The selected Stop launcher has changed. Restore the verified file before stopping.", "Launcher dùng để Stop đã thay đổi. Hãy khôi phục tệp đã kiểm chứng trước khi dừng.";
     RUNTIME_RUN_MISMATCH => "The launcher run identity no longer matches the cnl-owned instance.", "Định danh phiên launcher không còn khớp với phiên do cnl quản lý.";
     LAUNCHER_ID_MISSING => "Missing launcher run identity", "Thiếu định danh phiên launcher";

@@ -33,6 +33,7 @@
 - Preserve split terminal groups when opening or selecting an independent session.
 - Detect native Bash, Git Bash and selectable WSL Bash profiles while preserving native terminal completion.
 - Use checkout and shell context in the CNL palette with bounded local Git, PowerShell, CMD, Bash and WSL metadata.
+- Recover the same virtual runtime profile after a confirmed native shutdown or Windows restart, with checks for active processes, native locks and occupied ports.
 
 ### Tiếng Việt
 
@@ -65,3 +66,4 @@
 - Giữ nhóm terminal đã chia khi mở hoặc chọn một phiên riêng.
 - Phát hiện Bash native, Git Bash và hồ sơ WSL Bash theo từng bản phân phối, đồng thời giữ gợi ý Tab của shell.
 - Dùng ngữ cảnh checkout và shell trong bảng gợi ý CNL, với dữ liệu cục bộ có giới hạn cho Git, PowerShell, CMD, Bash và WSL.
+- Khôi phục cùng hồ sơ runtime mô phỏng sau khi xác nhận phiên native đã dừng hoặc Windows đã khởi động lại, đồng thời kiểm tra tiến trình còn chạy, khóa native và cổng đang sử dụng.

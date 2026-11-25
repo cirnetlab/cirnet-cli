@@ -149,6 +149,8 @@ cnl verify
 
 Use `--initialize-db` on the first launch of each fresh profile. A successful `build --all` replaces the selected receipt only after verifying the new candidate. The selection records the workspace, state directory, profile and manifest digest. The `receipt` field in the build report is the path to pass to `--receipt`. This option selects a candidate for the current invocation and keeps the saved selection. If the receipt is missing or invalid, build again in the same scope or use another verified receipt. For a long Windows build path, select a short external directory with `--state-dir`.
 
+If Windows restarts during a virtual development session, run `cnl stop --desktop interface` in the same profile. Stop and Run can clear the old CLI record when the owned processes are gone, the native data lock and session ports are free, and the launcher recorded a clean shutdown for that run. When a restart interrupted the launcher before it could write a result, the CLI requires matching launcher metadata, the pinned candidate files, and Windows evidence of a later boot. If Stop still reports an error, keep the runtime records and inspect `cnl status` and `cnl logs --service native`.
+
 Useful previews and focused checks
 
 ```powershell

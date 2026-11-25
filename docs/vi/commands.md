@@ -149,6 +149,8 @@ cnl verify
 
 Dùng `--initialize-db` ở lần chạy đầu tiên của mỗi hồ sơ mới. `build --all` chỉ cập nhật receipt đã chọn sau khi kiểm chứng ứng viên mới. Thông tin lựa chọn lưu workspace, thư mục trạng thái, hồ sơ và mã băm manifest. Trường `receipt` trong báo cáo bản dựng là đường dẫn truyền vào `--receipt`. Cờ này chọn ứng viên cho lần gọi hiện tại và giữ nguyên lựa chọn đã lưu. Nếu receipt thiếu hoặc không hợp lệ, build lại trong cùng phạm vi hoặc chọn receipt đã kiểm chứng khác. Nếu đường dẫn bản dựng trên Windows quá dài, chọn thư mục ngắn bên ngoài repo bằng `--state-dir`.
 
+Nếu Windows khởi động lại trong lúc chạy phiên phát triển mô phỏng, hãy chạy `cnl stop --desktop interface` với cùng hồ sơ. Stop và Run có thể xóa bản ghi CLI cũ khi các tiến trình thuộc phiên đã thoát, khóa dữ liệu native và các cổng của phiên đã được giải phóng, đồng thời launcher đã ghi nhận phiên đó dừng an toàn. Nếu lần khởi động lại làm launcher chưa kịp ghi kết quả, CLI cần metadata khớp với phiên, các tệp ứng viên đúng mã băm đã lưu và bằng chứng Windows khởi động sau thời điểm bắt đầu phiên. Nếu Stop vẫn báo lỗi, hãy giữ hồ sơ runtime và kiểm tra `cnl status` cùng `cnl logs --service native`.
+
 Ví dụ xem trước và kiểm tra theo phạm vi
 
 ```powershell

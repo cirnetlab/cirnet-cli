@@ -1,6 +1,6 @@
 use crate::localization::{self, message};
 
-use std::process::Child;
+use std::{fs::File, path::Path, process::Child};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,63 @@ impl Process {
     pub fn active(&self) -> Result<bool> {
         Ok(creation_time(self.pid)? == Some(self.created))
     }
+
+    pub fn created_before(&self, file_time: u64) -> bool {
+        self.created != 0 && self.created < file_time
+    }
+}
+
+pub(super) fn open_native_run_lock(path: &Path) -> std::io::Result<File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        File::options()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+pub(super) fn windows_boot_time() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use std::{process::Command, time::Duration};
+
+        const QUERY: &str = r#"
+$ErrorActionPreference = 'Stop'
+$boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToFileTimeUtc()
+$event = Get-WinEvent -FilterHashtable @{
+    LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-General'; Id = 12
+} -MaxEvents 1
+$stamp = ([xml]$event.ToXml()).Event.EventData.Data |
+    Where-Object Name -eq StartTime | Select-Object -ExpandProperty '#text'
+$started = [DateTimeOffset]::Parse($stamp, [Globalization.CultureInfo]::InvariantCulture).ToFileTime()
+if ([Math]::Abs($boot - $started) -lt [TimeSpan]::TicksPerSecond) {
+    [Math]::Min($boot, $started).ToString([Globalization.CultureInfo]::InvariantCulture)
+}
+"#;
+        let (_, output) = crate::process::metadata_output(
+            Command::new("pwsh.exe").args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                QUERY,
+            ]),
+            Duration::from_secs(10),
+            128,
+        )
+        .filter(|(status, _)| status.success())?;
+        std::str::from_utf8(&output).ok()?.trim().parse().ok()
+    }
+    #[cfg(not(windows))]
+    None
 }
 
 #[cfg(windows)]

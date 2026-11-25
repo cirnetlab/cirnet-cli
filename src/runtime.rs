@@ -81,11 +81,15 @@ impl Mode {
 }
 
 fn read_instance(state: &State) -> Result<Option<Instance>> {
-    match fs::read(state.dir.join("instance.json")) {
+    match fs::read(record_path(state)) {
         Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+fn record_path(state: &State) -> PathBuf {
+    state.dir.join("instance.json")
 }
 
 pub fn verify_ports(ports: &[u16]) -> Result<()> {
@@ -130,20 +134,10 @@ pub(crate) fn start(workspace: &Workspace, state: &State, args: &ArgMatches) -> 
     }
     let _lock = state.lock()?;
     if let Some(prior) = read_instance(state)? {
-        if prior.supervisor.active()?
-            || prior
-                .browser_server
-                .as_ref()
-                .is_some_and(|process| process.active().unwrap_or(true))
-        {
+        if prior.supervisor.active()? || browser_active(&prior)? {
             bail!("{}", message(localization::RUNTIME_ALREADY_OWNED));
         }
-        bail!(
-            "{} {}. {}",
-            message(localization::RUNTIME_EXITED_UNCONFIRMED),
-            prior.log_dir.display(),
-            message(localization::RUNTIME_EXITED_GUIDANCE)
-        );
+        reconcile_exited(state, &prior, ownership::windows_boot_time)?;
     }
     let mut ports = vec![profile.port, profile.hardware_port];
     if dev {
@@ -203,7 +197,7 @@ pub(crate) fn start(workspace: &Workspace, state: &State, args: &ArgMatches) -> 
         native_stopped: false,
         native_run_id: None,
     };
-    let record = state.dir.join("instance.json");
+    let record = record_path(state);
     write_json(&record, &instance)?;
     let startup = (|| -> Result<Value> {
         wait_for(
@@ -253,12 +247,11 @@ pub(crate) fn start(workspace: &Workspace, state: &State, args: &ArgMatches) -> 
     let backend = match startup {
         Ok(status) => status,
         Err(error) => {
-            let acted = if instance.supervisor.active()? && data.join("supervisor.json").is_file() {
-                shutdown(state, &mut instance).is_ok()
-            } else {
-                supervisor.try_wait()?.is_some() && !data.join("supervisor.json").exists()
-            };
-            if acted {
+            if instance.native_run_id.is_some() {
+                let _ = shutdown(state, &mut instance);
+            } else if supervisor.try_wait()?.is_some()
+                && !data.join("supervisor.json").try_exists()?
+            {
                 fs::remove_file(&record)?;
             }
             return Err(error).with_context(|| {
@@ -299,12 +292,7 @@ pub fn status(state: &State) -> Result<Value> {
         return Ok(json!({"state":"stopped","stateDirectory":state.dir}));
     };
     let active = instance.supervisor.active()?;
-    let dev_active = instance
-        .browser_server
-        .as_ref()
-        .map(Process::active)
-        .transpose()?
-        .unwrap_or(false);
+    let dev_active = browser_active(&instance)?;
     let native = if active {
         probe(&instance, false).unwrap_or_else(
             |error| json!({"healthy":false,"detail":localization::report_diagnostic(&error)}),
@@ -354,43 +342,56 @@ pub(crate) fn stop(state: &State, target: Option<Target>, dry: bool) -> Result<V
     };
     instance.target.verify(target)?;
     shutdown(state, &mut instance)?;
-    fs::remove_file(state.dir.join("instance.json"))?;
     Ok(json!({"state":"stopped","logDirectory":instance.log_dir}))
+}
+
+fn browser_active(instance: &Instance) -> Result<bool> {
+    Ok(instance
+        .browser_server
+        .as_ref()
+        .map(Process::active)
+        .transpose()?
+        .unwrap_or(false))
+}
+
+fn stop_browser(instance: &Instance) -> Result<()> {
+    if let Some(server) = &instance.browser_server
+        && server.active()?
+    {
+        fs::write(instance.log_dir.join("vite.stop"), "")?;
+        wait_for_exit(server, Duration::from_secs(15))?;
+        let outcome = fs::read_to_string(instance.log_dir.join("vite.result"))
+            .context(message(localization::VITE_CLEANUP_MISSING))?;
+        if outcome.trim() != "clean" {
+            bail!(
+                "{} {} · {}",
+                message(localization::VITE_CLEANUP),
+                outcome.trim(),
+                instance.log_dir.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn shutdown(state: &State, instance: &mut Instance) -> Result<()> {
     // Try native Stop even if Vite cannot exit; it owns service and worker cleanup.
-    let vite = (|| -> Result<()> {
-        if let Some(server) = &instance.browser_server
-            && server.active()?
-        {
-            fs::write(instance.log_dir.join("vite.stop"), "")?;
-            wait_for_exit(server, Duration::from_secs(15))?;
-            let outcome = fs::read_to_string(instance.log_dir.join("vite.result"))
-                .context(message(localization::VITE_CLEANUP_MISSING))?;
-            if outcome.trim() != "clean" {
-                bail!(
-                    "{} {} · {}",
-                    message(localization::VITE_CLEANUP),
-                    outcome.trim(),
-                    instance.log_dir.display()
-                );
-            }
-        }
-        Ok(())
-    })();
-    if instance.native_stopped {
-        return vite;
-    }
+    let vite = stop_browser(instance);
     if !instance.supervisor.active()? {
-        bail!("{}", message(localization::NATIVE_SHUTDOWN_UNCONFIRMED));
+        vite?;
+        return reconcile_exited(state, instance, ownership::windows_boot_time);
+    }
+    if instance.native_stopped {
+        bail!("{}", message(localization::RUNTIME_ALREADY_OWNED));
     }
     if sha(&instance.bundle.join("cirnet-native.ps1"))? != instance.launcher_hash {
         bail!("{}", message(localization::STOP_LAUNCHER_CHANGED));
     }
-    if let Some(expected) = &instance.native_run_id
-        && &native_run_id(state)? != expected
-    {
+    let expected = instance
+        .native_run_id
+        .as_deref()
+        .context(message(localization::LAUNCHER_ID_MISSING))?;
+    if native_run_id(state)? != expected {
         bail!("{}", message(localization::RUNTIME_RUN_MISMATCH));
     }
     run(&mut launcher(
@@ -402,8 +403,89 @@ fn shutdown(state: &State, instance: &mut Instance) -> Result<()> {
     ))?;
     wait_for_exit(&instance.supervisor, Duration::from_secs(10))?;
     instance.native_stopped = true;
-    write_json(&state.dir.join("instance.json"), instance)?;
-    vite
+    write_json(&record_path(state), instance)?;
+    vite?;
+    Ok(fs::remove_file(record_path(state))?)
+}
+
+fn reconcile_exited(
+    state: &State,
+    instance: &Instance,
+    boot_time: impl FnOnce() -> Option<u64>,
+) -> Result<()> {
+    (|| {
+        let data = state.dir.join("data");
+        // Hold the launcher's exclusive lock through reconciliation. A native
+        // launcher invoked outside the CLI uses this lock for the same data directory.
+        let _native_lock = ownership::open_native_run_lock(&data.join("run.lock"))
+            .context(message(localization::RUNTIME_NATIVE_LOCK))?;
+        if instance.supervisor.active()? || browser_active(instance)? {
+            bail!("{}", message(localization::RUNTIME_ALREADY_OWNED));
+        }
+        let control = data.join("supervisor.json").try_exists()?;
+        let run_id = instance
+            .native_run_id
+            .as_deref()
+            .map(valid_run_id)
+            .transpose()?;
+        if let Some(id) = run_id
+            && data.join(format!("stop-{id}")).try_exists()?
+        {
+            bail!("{}", message(localization::RUNTIME_STOP_PENDING));
+        }
+        if instance.native_stopped {
+            if control {
+                bail!("{}", message(localization::RUNTIME_RUN_MISMATCH));
+            }
+        } else {
+            let id = run_id.context(message(localization::LAUNCHER_ID_MISSING))?;
+            match fs::read(data.join(format!("result-{id}"))) {
+                Ok(result) if result == b"clean" && !control => {}
+                Ok(result) if result == b"clean" => {
+                    bail!("{}", message(localization::RUNTIME_RUN_MISMATCH));
+                }
+                Ok(_) => bail!("{}", message(localization::RUNTIME_RESULT_UNCLEAN)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if !control || native_run_id(state)? != id {
+                        bail!("{}", message(localization::RUNTIME_RUN_MISMATCH));
+                    }
+                    // CLI Start uses the verified, simulation-only native launcher.
+                    // A later full Windows boot proves that its old process tree is gone.
+                    if sha(&instance.bundle.join("cirnet-native.ps1"))? != instance.launcher_hash
+                        || sha(&instance.bundle.join("native-manifest.json"))? != instance.digest
+                    {
+                        bail!("{}", message(localization::STOP_LAUNCHER_CHANGED));
+                    }
+                    if !boot_time().is_some_and(|boot| {
+                        instance.supervisor.created_before(boot)
+                            && instance
+                                .browser_server
+                                .as_ref()
+                                .is_none_or(|p| p.created_before(boot))
+                    }) {
+                        bail!("{}", message(localization::RUNTIME_REBOOT_UNCONFIRMED));
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        instance.profile.validate()?;
+        let mut ports = vec![instance.profile.port, instance.profile.hardware_port];
+        if instance.dev {
+            ports.push(instance.profile.dev_port);
+        }
+        verify_ports(&ports)?;
+        // The launcher owns its control file and will replace it on the next Start.
+        Ok(fs::remove_file(record_path(state))?)
+    })()
+    .with_context(|| {
+        format!(
+            "{} {}. {}",
+            message(localization::RUNTIME_EXITED_UNCONFIRMED),
+            instance.log_dir.display(),
+            message(localization::RUNTIME_EXITED_GUIDANCE)
+        )
+    })
 }
 
 fn native_run_id(state: &State) -> Result<String> {
@@ -412,10 +494,14 @@ fn native_run_id(state: &State) -> Result<String> {
     let id = control["id"]
         .as_str()
         .context(message(localization::LAUNCHER_ID_MISSING))?;
+    Ok(valid_run_id(id)?.to_owned())
+}
+
+fn valid_run_id(id: &str) -> Result<&str> {
     if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("{}", message(localization::LAUNCHER_ID_INVALID));
     }
-    Ok(id.to_owned())
+    Ok(id)
 }
 
 fn url(instance: &Instance) -> String {
@@ -645,6 +731,9 @@ fn log_tail(
     tail.reverse();
     Ok(tail.join("\n"))
 }
+
+#[cfg(all(test, windows))]
+mod recovery_tests;
 
 #[cfg(test)]
 mod log_tests {
