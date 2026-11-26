@@ -620,26 +620,32 @@ pub(super) fn discovery_candidates(root: &Path, depth: usize) -> Result<Vec<Path
         if level >= depth {
             continue;
         }
-        let entries = match fs::read_dir(path) {
+        let entries = match fs::read_dir(&path) {
             Ok(entries) => entries,
             Err(error) if level == 0 => return Err(error.into()),
             Err(_) => continue,
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_lowercase();
-            if matches!(
-                name.as_str(),
-                ".git"
-                    | ".cirnet-build-output"
-                    | ".cache"
-                    | ".venv"
-                    | "__pycache__"
-                    | "target"
-                    | "node_modules"
-                    | "build"
-                    | "dist"
-                    | "venv"
-            ) {
+            let checkpoint_store = name == "tasks"
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(".cirnet"));
+            if checkpoint_store
+                || matches!(
+                    name.as_str(),
+                    ".git"
+                        | ".cirnet-build-output"
+                        | ".cache"
+                        | ".venv"
+                        | "__pycache__"
+                        | "target"
+                        | "node_modules"
+                        | "build"
+                        | "dist"
+                        | "venv"
+                )
+            {
                 continue;
             }
             remaining.push((entry.path(), level + 1));

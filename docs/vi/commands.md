@@ -193,3 +193,7 @@ Bash
 cnl completion bash > cnl-completion.bash
 source ./cnl-completion.bash
 ```
+
+## Lưu trữ phát triển cục bộ
+
+Đặt `CIRNET_LOCAL_STORAGE_ROOT` trong tiến trình gọi lệnh. CLI dùng bộ cấp phát Contracts của workspace cho đầu ra phát triển thành phần. Giữ `CIRNET_ARTIFACTS_SESSION` khi lặp lệnh trên cùng worktree. Đặt `CARGO_TARGET_DIR` trong phiên đó nếu cần ghi đè. Lắp ráp hệ thống dùng namespace Remote. Lựa chọn candidate và trạng thái runtime giữ cơ chế sở hữu hiện có.

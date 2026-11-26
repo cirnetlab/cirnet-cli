@@ -99,6 +99,18 @@ fn scans_over_one_hundred_repositories_skipping_unrelated_and_deep_paths() {
 }
 
 #[test]
+fn discovery_excludes_reserved_storage_and_keeps_worktree_siblings() {
+    let fixture = TempRepo::new();
+    let branch = fixture.0.join("Branch");
+    let worktree = branch.join("worktrees").join("checkout");
+    fixture.init(&worktree);
+    fixture.init(&branch.join(".cirnet-build-output/cirnet-cli/fixture"));
+    fixture.init(&branch.join(".cirnet/tasks/cirnet-cli/fixture"));
+    let found = discover(&fixture.0, 5).unwrap();
+    assert_eq!(found, [fs::canonicalize(worktree).unwrap()]);
+}
+
+#[test]
 fn worktree_resolves_the_same_common_storage_and_refuses_nested_directories() {
     let fixture = TempRepo::new();
     let main = fixture.0.join("primary");

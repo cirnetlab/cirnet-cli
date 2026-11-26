@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory,ParameterSetName='System')][string] $OutputParent,
     [Parameter(Mandatory,ParameterSetName='Component')][string] $Component,
     [Parameter(Mandatory,ParameterSetName='Component')][ValidateSet('build','test')][string] $CargoOperation,
+    [Parameter(ParameterSetName='Component')][string] $ArtifactAllocator,
     [switch] $Offline
 )
 $ErrorActionPreference = 'Stop'
@@ -25,10 +26,42 @@ if ($PSCmdlet.ParameterSetName -eq 'System') {
     }
 } else {
     Push-Location -LiteralPath $Component
+    $previousTarget = $env:CARGO_TARGET_DIR
+    $previousOffline = $env:CARGO_NET_OFFLINE
+    $previousTemp = @($env:TEMP, $env:TMP, $env:TMPDIR)
     try {
+        if ($null -ne $env:CIRNET_LOCAL_STORAGE_ROOT -or !$env:CARGO_TARGET_DIR) {
+            if (!$ArtifactAllocator) {
+                $workspace = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+                $ArtifactAllocator = Join-Path $workspace 'cirnet-contracts/tools/artifact-paths/cirnet_artifact_paths/artifact-paths.mjs'
+            }
+            if ($env:CARGO_BUILD_TARGET_DIR -or $env:CARGO_BUILD_BUILD_DIR -or $env:CARGO_BUILD_DIR) {
+                throw 'Use only CARGO_TARGET_DIR for an explicit component build directory.'
+            }
+            if ($env:CARGO_TARGET_DIR) {
+                $null = node $ArtifactAllocator --parent-info
+                if ($env:CIRNET_ARTIFACTS_SESSION -or $env:NETCIRCUIT_ARTIFACTS_SESSION) {
+                    $owned = node $ArtifactAllocator
+                    $relative = [IO.Path]::GetRelativePath($owned, $env:CARGO_TARGET_DIR)
+                    if ([IO.Path]::IsPathRooted($relative) -or $relative -match '^\.\.(?:[\\/]|$)') {
+                        throw 'CARGO_TARGET_DIR conflicts with the inherited artifact session.'
+                    }
+                }
+                $env:CARGO_TARGET_DIR = node $ArtifactAllocator --validate $env:CARGO_TARGET_DIR
+            }
+            else { $env:CARGO_TARGET_DIR = node $ArtifactAllocator cargo }
+        }
+        if ($null -ne $env:CIRNET_LOCAL_STORAGE_ROOT) {
+            $temp = node $ArtifactAllocator --validate (Join-Path $env:CARGO_TARGET_DIR 'tmp')
+            $null = New-Item -ItemType Directory -Path $temp -Force
+            $env:TEMP = $env:TMP = $env:TMPDIR = $temp
+        }
         if ($Offline) { $env:CARGO_NET_OFFLINE = 'true' }
         cargo.exe $CargoOperation --locked --release
     } finally {
+        $env:CARGO_TARGET_DIR = $previousTarget
+        $env:CARGO_NET_OFFLINE = $previousOffline
+        $env:TEMP, $env:TMP, $env:TMPDIR = $previousTemp
         Pop-Location
     }
 }

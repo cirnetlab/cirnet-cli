@@ -181,6 +181,23 @@ pub fn output_dir(parent: &Path, label: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
+fn storage_allocator(workspace: &Workspace) -> Result<PathBuf> {
+    Ok(workspace
+        .require(Repo::Contracts)?
+        .join("tools/artifact-paths/cirnet_artifact_paths/artifact-paths.mjs"))
+}
+
+fn development_output(workspace: &Workspace, root: &Path) -> Result<PathBuf> {
+    let mut allocator = Command::new("node");
+    isolate_git(&mut allocator);
+    let output = capture(
+        allocator
+            .arg(storage_allocator(workspace)?)
+            .current_dir(root),
+    )?;
+    Ok(PathBuf::from(output.trim()))
+}
+
 fn selected(arguments: &ArgMatches) -> Vec<Repo> {
     arguments
         .get_many::<String>("repo")
@@ -212,9 +229,21 @@ pub fn build(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result<
     {
         record.validate_scope(workspace, state)?;
     }
-    let output = output_dir(&state.dir.join("builds"), "build")?;
+    let centralized = env::var_os("CIRNET_LOCAL_STORAGE_ROOT").is_some();
     if all {
         let remote = workspace.require(Repo::Remote)?;
+        let mut parent = state.dir.join("builds");
+        if centralized {
+            let mut allocator = Command::new("node");
+            in_build_directory(&mut allocator, &remote);
+            let resolved = capture(
+                allocator
+                    .arg(storage_allocator(workspace)?)
+                    .arg("--parent-info"),
+            )?;
+            parent = PathBuf::from(resolved.trim());
+        }
+        let output = output_dir(&parent, "build")?;
         let selection = output.join("selection.json");
         let mut select = Command::new("node");
         select
@@ -236,7 +265,12 @@ pub fn build(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result<
         if args.get_flag("offline") {
             command.arg("-Offline");
         }
-        run(in_build_directory(&mut command, &remote))?;
+        in_build_directory(&mut command, &remote);
+        if centralized {
+            command.env_remove("CIRNET_ARTIFACTS_DIR");
+            command.env_remove("NETCIRCUIT_ARTIFACTS_DIR");
+        }
+        run(&mut command)?;
         let mut receipts = Vec::new();
         for entry in fs::read_dir(&output)? {
             let path = entry?.path().join("assembly-result.json");
@@ -264,8 +298,16 @@ pub fn build(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result<
     } else {
         None
     };
+    let legacy_output = (!centralized)
+        .then(|| output_dir(&state.dir.join("builds"), "build"))
+        .transpose()?;
+    let mut outputs = Vec::new();
     for repo in selection {
         let dir = workspace.require(repo)?;
+        let output = match &legacy_output {
+            Some(path) => path.clone(),
+            None => development_output(workspace, &dir)?,
+        };
         match repo {
             Repo::Simulator => {
                 simulator(&dir, &output)?;
@@ -273,33 +315,36 @@ pub fn build(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result<
             Repo::Interface => {
                 let build = chosen.as_ref().unwrap();
                 prepare_web(&dir, build, args.get_flag("offline"))?;
-                run(Command::new("npm.cmd")
-                    .args(["run", "build"])
-                    .current_dir(&dir))?;
+                let mut npm = Command::new("npm.cmd");
+                npm.args(["run", "build"]).current_dir(&dir);
+                if centralized {
+                    npm.env(
+                        "CIRNET_ARTIFACT_PATHS_MODULE",
+                        storage_allocator(workspace)?,
+                    )
+                    .env("CIRNET_ARTIFACTS_SESSION", &output)
+                    .env("NETCIRCUIT_ARTIFACTS_SESSION", &output);
+                }
+                run(&mut npm)?;
             }
-            Repo::Embedded => rtl(&dir, chosen.as_ref().unwrap(), args, &output)?,
-            _ => cargo(&dir, &output, "build", args.get_flag("offline"))?,
+            Repo::Embedded => rtl(workspace, &dir, chosen.as_ref().unwrap(), args, &output)?,
+            _ => cargo(workspace, &dir, &output, "build", args.get_flag("offline"))?,
         }
+        outputs.push(output);
     }
-    Ok(json!({"state":"built","buildOrder":names,"output":output}))
+    Ok(json!({"state":"built","buildOrder":names,"output":outputs.last(),"outputs":outputs}))
 }
 
 pub fn prepare_web(web: &Path, candidate: &Candidate, offline: bool) -> Result<()> {
     let inputs = candidate.session().join("interface-input.json");
     let selected = trusted_web_inputs(candidate, &inputs)?;
     preserve_old_web_inputs(web, &selected)?;
-    let ownership: Value = serde_json::from_slice(&fs::read(
-        candidate.session().join(".cirnet-artifact-session.json"),
-    )?)?;
     let mut bootstrap = Command::new("node");
-    capture(
-        in_build_directory(&mut bootstrap, web)
-            .arg(web.join("scripts/bootstrap-contracts.mjs"))
-            .arg("--manifest")
-            .arg(&inputs)
-            .env("CIRNET_ARTIFACTS_CONTEXT", ownership["context"].to_string())
-            .env("CIRNET_ARTIFACTS_SESSION", candidate.session()),
-    )?;
+    in_build_directory(&mut bootstrap, web)
+        .arg(web.join("scripts/bootstrap-contracts.mjs"))
+        .arg("--manifest")
+        .arg(&inputs);
+    capture(with_candidate_artifacts(&mut bootstrap, candidate)?)?;
     let mut npm = Command::new("npm.cmd");
     npm.args(["ci", "--ignore-scripts", "--no-audit", "--no-fund"])
         .current_dir(web);
@@ -307,6 +352,24 @@ pub fn prepare_web(web: &Path, candidate: &Candidate, offline: bool) -> Result<(
         npm.env("npm_config_offline", "true");
     }
     run(&mut npm)
+}
+
+fn with_candidate_artifacts<'a>(
+    command: &'a mut Command,
+    candidate: &Candidate,
+) -> Result<&'a mut Command> {
+    let session = candidate.session();
+    let ownership: Value =
+        serde_json::from_slice(&fs::read(session.join(".cirnet-artifact-session.json"))?)?;
+    let context = ownership["context"].to_string();
+    let parent = session.parent().context("Missing artifact parent")?;
+    for prefix in ["CIRNET", "NETCIRCUIT"] {
+        command
+            .env(format!("{prefix}_ARTIFACTS_CONTEXT"), &context)
+            .env(format!("{prefix}_ARTIFACTS_SESSION"), session)
+            .env(format!("{prefix}_ARTIFACTS_DIR"), parent);
+    }
+    Ok(command)
 }
 
 const WEB_ROLES: [&str; 4] = ["npm", "dev_npm", "native_crate", "remote_openapi"];
@@ -429,7 +492,6 @@ pub fn verify(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result
         );
     }
     let _lock = state.lock()?;
-    let output = output_dir(&state.dir.join("verification"), "verify")?;
     if targets.is_empty() {
         let candidate = candidate(workspace, state, args.get_one("receipt"))?;
         let runner = candidate
@@ -456,8 +518,22 @@ pub fn verify(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result
             json!({"state":"verified","receipt":candidate.receipt,"browser":browser.is_some()}),
         );
     }
+    let centralized = env::var_os("CIRNET_LOCAL_STORAGE_ROOT").is_some();
+    let legacy_output = (!centralized)
+        .then(|| output_dir(&state.dir.join("verification"), "verify"))
+        .transpose()?;
+    let mut outputs = Vec::new();
     for repo in &targets {
         let dir = workspace.require(*repo)?;
+        let output = match &legacy_output {
+            Some(path) => path.clone(),
+            None if *repo == Repo::Interface => {
+                candidate(workspace, state, args.get_one("receipt"))?
+                    .session()
+                    .to_path_buf()
+            }
+            None => development_output(workspace, &dir)?,
+        };
         match repo {
             Repo::Simulator => {
                 let worker = simulator(&dir, &output)?;
@@ -477,6 +553,7 @@ pub fn verify(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result
                     .env("CIRNET_TEST_CPP_WORKER", worker))?;
             }
             Repo::Embedded => rtl(
+                workspace,
                 &dir,
                 &candidate(workspace, state, args.get_one("receipt"))?,
                 args,
@@ -485,29 +562,31 @@ pub fn verify(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result
             Repo::Interface => {
                 let build = candidate(workspace, state, args.get_one("receipt"))?;
                 let web = build.session().join("src/cirnet-interface");
-                let ownership: Value = serde_json::from_slice(&fs::read(
-                    build.session().join(".cirnet-artifact-session.json"),
-                )?)?;
                 let mut npm = Command::new("npm.cmd");
-                run(npm
-                    .args(["test", "--", "--all-script-tests"])
+                npm.args(["test", "--", "--all-script-tests"])
                     .current_dir(web)
                     .env(
                         "CIRNET_CONTRACTS_ARTIFACT_MANIFEST",
                         build.session().join("interface-input.json"),
-                    )
-                    .env("CIRNET_ARTIFACTS_CONTEXT", ownership["context"].to_string())
-                    .env("CIRNET_ARTIFACTS_SESSION", build.session()))?;
+                    );
+                run(with_candidate_artifacts(&mut npm, &build)?)?;
             }
-            _ => cargo(&dir, &output, "test", false)?,
+            _ => cargo(workspace, &dir, &output, "test", false)?,
         }
+        outputs.push(output);
     }
     Ok(
-        json!({"state":"verified","targets":targets.iter().map(|repo| repo.name()).collect::<Vec<_>>(),"output":output}),
+        json!({"state":"verified","targets":targets.iter().map(|repo| repo.name()).collect::<Vec<_>>(),"output":outputs.last(),"outputs":outputs}),
     )
 }
 
-fn cargo(root: &Path, output: &Path, task: &str, offline: bool) -> Result<()> {
+fn cargo(
+    workspace: &Workspace,
+    root: &Path,
+    output: &Path,
+    task: &str,
+    offline: bool,
+) -> Result<()> {
     let driver = output.join("cargo.ps1");
     fs::write(&driver, include_str!("../scripts/windows-build.ps1"))?;
     let mut command = powershell();
@@ -517,6 +596,22 @@ fn cargo(root: &Path, output: &Path, task: &str, offline: bool) -> Result<()> {
         .arg(root)
         .args(["-CargoOperation", task])
         .env("CARGO_TARGET_DIR", output.join("cargo"));
+    if env::var_os("CIRNET_LOCAL_STORAGE_ROOT").is_some() {
+        command
+            .arg("-ArtifactAllocator")
+            .arg(storage_allocator(workspace)?)
+            .env("CIRNET_ARTIFACTS_SESSION", output)
+            .env("NETCIRCUIT_ARTIFACTS_SESSION", output);
+        for name in [
+            "CIRNET_ARTIFACTS_CONTEXT",
+            "NETCIRCUIT_ARTIFACTS_CONTEXT",
+            "CARGO_TARGET_DIR",
+        ] {
+            if let Some(value) = env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+    }
     if offline {
         command.arg("-Offline");
     }
@@ -569,7 +664,13 @@ fn python() -> std::ffi::OsString {
     env::var_os("CNL_VERIFICATION_PYTHON").unwrap_or_else(|| "python".into())
 }
 
-fn rtl(root: &Path, candidate: &Candidate, args: &ArgMatches, output: &Path) -> Result<()> {
+fn rtl(
+    workspace: &Workspace,
+    root: &Path,
+    candidate: &Candidate,
+    args: &ArgMatches,
+    output: &Path,
+) -> Result<()> {
     let toolchain = args
         .get_one::<PathBuf>("fpga-toolchain")
         .cloned()
@@ -579,10 +680,30 @@ fn rtl(root: &Path, candidate: &Candidate, args: &ArgMatches, output: &Path) -> 
     let receipt = candidate
         .session()
         .join("contracts/contracts-native-manifest.json");
-    let allocator = candidate
-        .session()
-        .join("src/cirnet-contracts/tools/artifact-paths/cirnet_artifact_paths/artifact-paths.mjs");
+    let centralized = env::var_os("CIRNET_LOCAL_STORAGE_ROOT").is_some();
+    let allocator = if centralized {
+        storage_allocator(workspace)?
+    } else {
+        candidate.session().join(
+            "src/cirnet-contracts/tools/artifact-paths/cirnet_artifact_paths/artifact-paths.mjs",
+        )
+    };
     let mut command = Command::new(python());
+    let parent = if centralized {
+        output.parent().context("Missing artifact parent")?
+    } else {
+        output
+    };
+    for prefix in ["CIRNET", "NETCIRCUIT"] {
+        command.env(format!("{prefix}_ARTIFACTS_DIR"), parent);
+        if centralized {
+            command.env(format!("{prefix}_ARTIFACTS_SESSION"), output);
+        } else {
+            command
+                .env_remove(format!("{prefix}_ARTIFACTS_SESSION"))
+                .env_remove(format!("{prefix}_ARTIFACTS_CONTEXT"));
+        }
+    }
     run(command
         .current_dir(root)
         .args(["-B", "scripts/check_rtl.py", "--toolchain-root"])
@@ -591,11 +712,6 @@ fn rtl(root: &Path, candidate: &Candidate, args: &ArgMatches, output: &Path) -> 
         .arg(&receipt)
         .arg("--contracts-sha256")
         .arg(sha(&receipt)?)
-        .env("CIRNET_ARTIFACTS_DIR", output)
-        .env_remove("CIRNET_ARTIFACTS_SESSION")
-        .env_remove("NETCIRCUIT_ARTIFACTS_SESSION")
-        .env_remove("CIRNET_ARTIFACTS_CONTEXT")
-        .env_remove("NETCIRCUIT_ARTIFACTS_CONTEXT")
         .env("CIRNET_ARTIFACTS_CLI_SHA256", sha(&allocator)?)
         .env("CIRNET_ARTIFACTS_CLI", allocator))
 }
