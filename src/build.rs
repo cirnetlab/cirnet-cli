@@ -198,6 +198,41 @@ fn development_output(workspace: &Workspace, root: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(output.trim()))
 }
 
+fn validate_inherited_output(workspace: &Workspace, roots: &[PathBuf]) -> Result<()> {
+    if ["CIRNET_ARTIFACTS_SESSION", "NETCIRCUIT_ARTIFACTS_SESSION"]
+        .iter()
+        .all(|name| env::var_os(name).is_none())
+    {
+        if !roots.is_empty() && env::var_os("CARGO_TARGET_DIR").is_some() {
+            bail!("Set CARGO_TARGET_DIR inside an existing owned artifact session");
+        }
+        return Ok(());
+    }
+    let allocator = storage_allocator(workspace)?;
+    for root in roots {
+        let mut command = Command::new("node");
+        isolate_git(&mut command);
+        capture(
+            command
+                .arg(&allocator)
+                .arg("--session-info")
+                .current_dir(root),
+        )?;
+    }
+    Ok(())
+}
+
+fn lock_component_output(output: &Path) -> Result<fs::File> {
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(output.join("cnl-component.lock"))?;
+    lock.try_lock()
+        .context("Artifact session is in use by another CLI component operation")?;
+    Ok(lock)
+}
+
 fn selected(arguments: &ArgMatches) -> Vec<Repo> {
     arguments
         .get_many::<String>("repo")
@@ -215,12 +250,16 @@ pub fn build(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result<
         Repo::ordered(&selected(args))
     };
     let names = selection.iter().map(|repo| repo.name()).collect::<Vec<_>>();
+    let reuse = args.get_flag("reuse-candidate");
     if args.get_flag("dry-run") {
-        return Ok(json!({"dryRun":true,"buildOrder":names,"stateDirectory":state.dir}));
+        return Ok(
+            json!({"dryRun":true,"buildOrder":names,"reuseCandidate":reuse,"stateDirectory":state.dir}),
+        );
     }
-    for &repo in &selection {
-        workspace.require(repo)?;
-    }
+    let roots = selection
+        .iter()
+        .map(|repo| workspace.require(*repo))
+        .collect::<Result<Vec<_>>>()?;
     let _lock = state.lock()?;
     let pointer = state.dir.join("candidate.json");
     if all
@@ -230,6 +269,34 @@ pub fn build(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result<
         record.validate_scope(workspace, state)?;
     }
     let centralized = env::var_os("CIRNET_LOCAL_STORAGE_ROOT").is_some();
+    if reuse {
+        let selected = candidate(workspace, state, args.get_one("receipt"))?;
+        let evidence = canonical(
+            args.get_one::<PathBuf>("verification-evidence")
+                .context("Missing verification evidence")?,
+        )?;
+        let evidence_sha = args
+            .get_one::<String>("verification-sha256")
+            .context("Missing verification SHA-256")?;
+        let remote = workspace.require(Repo::Remote)?;
+        let mut check = Command::new("node");
+        capture(
+            in_build_directory(&mut check, &remote)
+                .arg(remote.join("scripts/native-source-selection.mjs"))
+                .arg("reuse-check")
+                .arg(&selected.receipt)
+                .arg(evidence)
+                .arg(evidence_sha)
+                .arg(&selected.manifest_sha256),
+        )?;
+        write_json(
+            &pointer,
+            &CandidateSelection::new(workspace, state, &selected),
+        )?;
+        return Ok(
+            json!({"state":"reused","receipt":selected.receipt,"bundle":selected.directory,"manifestSha256":selected.manifest_sha256}),
+        );
+    }
     if all {
         let remote = workspace.require(Repo::Remote)?;
         let mut parent = state.dir.join("builds");
@@ -290,6 +357,9 @@ pub fn build(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result<
         );
     }
 
+    if centralized {
+        validate_inherited_output(workspace, &roots)?;
+    }
     let chosen = if selection
         .iter()
         .any(|repo| matches!(repo, Repo::Interface | Repo::Embedded))
@@ -308,6 +378,9 @@ pub fn build(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result<
             Some(path) => path.clone(),
             None => development_output(workspace, &dir)?,
         };
+        let _output_lock = centralized
+            .then(|| lock_component_output(&output))
+            .transpose()?;
         match repo {
             Repo::Simulator => {
                 simulator(&dir, &output)?;
@@ -522,6 +595,14 @@ pub fn verify(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result
     let legacy_output = (!centralized)
         .then(|| output_dir(&state.dir.join("verification"), "verify"))
         .transpose()?;
+    if centralized {
+        let roots = targets
+            .iter()
+            .filter(|repo| **repo != Repo::Interface)
+            .map(|repo| workspace.require(*repo))
+            .collect::<Result<Vec<_>>>()?;
+        validate_inherited_output(workspace, &roots)?;
+    }
     let mut outputs = Vec::new();
     for repo in &targets {
         let dir = workspace.require(*repo)?;
@@ -534,6 +615,9 @@ pub fn verify(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result
             }
             None => development_output(workspace, &dir)?,
         };
+        let _output_lock = centralized
+            .then(|| lock_component_output(&output))
+            .transpose()?;
         match repo {
             Repo::Simulator => {
                 let worker = simulator(&dir, &output)?;
@@ -550,6 +634,7 @@ pub fn verify(workspace: &Workspace, state: &State, args: &ArgMatches) -> Result
                     ])
                     .arg(output.join("sim-pytest"))
                     .arg("tests")
+                    .env("CIRNET_TEST_CPP_WORKER_SHA256", sha(&worker)?)
                     .env("CIRNET_TEST_CPP_WORKER", worker))?;
             }
             Repo::Embedded => rtl(

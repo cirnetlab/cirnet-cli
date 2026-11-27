@@ -195,6 +195,18 @@ pub(crate) fn option(id: &str) -> Option<Localized> {
             "Select a repository; repeat to add more",
             "Chọn repo, lặp lại tùy chọn để thêm repo",
         ],
+        "reuse-candidate" => [
+            "Reuse a reviewed compatible native candidate",
+            "Dùng lại candidate native tương thích đã review",
+        ],
+        "verification-evidence" => [
+            "Packaged verification result file",
+            "Tệp kết quả xác minh gói",
+        ],
+        "verification-sha256" => [
+            "Reviewed SHA-256 of the verification result",
+            "SHA-256 đã review của kết quả xác minh",
+        ],
         "offline" => [
             "Use cached data without accessing the network",
             "Dùng dữ liệu trong cache mà không truy cập mạng",

@@ -197,3 +197,5 @@ source ./cnl-completion.bash
 ## Lưu trữ phát triển cục bộ
 
 Đặt `CIRNET_LOCAL_STORAGE_ROOT` trong tiến trình gọi lệnh. CLI dùng bộ cấp phát Contracts của workspace cho đầu ra phát triển thành phần. Giữ `CIRNET_ARTIFACTS_SESSION` khi lặp lệnh trên cùng worktree. Đặt `CARGO_TARGET_DIR` trong phiên đó nếu cần ghi đè. Lắp ráp hệ thống dùng namespace Remote. Lựa chọn candidate và trạng thái runtime giữ cơ chế sở hữu hiện có.
+
+Từ shell MSVC x64, dùng `cnl build --all --reuse-candidate --receipt <ASSEMBLY_RECEIPT> --verification-evidence <RESULT> --verification-sha256 <HASH>` để dùng lại candidate đã review. Lệnh kiểm tra nguồn hiện tại, manifest và bằng chứng trình duyệt đóng gói trước khi cập nhật con trỏ profile. `cnl build --all` yêu cầu candidate mới. Khi kế thừa phiên build thành phần, mọi repo được chọn phải thuộc ngữ cảnh đã xác minh của phiên. Các lệnh build và test CLI liên quan lấy khóa độc quyền trên phiên đó.

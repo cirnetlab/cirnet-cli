@@ -104,6 +104,15 @@ pub(crate) fn app_for(vi: bool) -> Command {
                     .args([
                         flag("all"),
                         selected(),
+                        flag("reuse-candidate").requires_all([
+                            "all",
+                            "verification-evidence",
+                            "verification-sha256",
+                        ]),
+                        path("verification-evidence").requires("reuse-candidate"),
+                        Arg::new("verification-sha256")
+                            .long("verification-sha256")
+                            .requires("reuse-candidate"),
                         flag("offline"),
                         flag("dry-run"),
                         path("receipt"),

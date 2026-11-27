@@ -39,9 +39,8 @@ if ($PSCmdlet.ParameterSetName -eq 'System') {
                 throw 'Use only CARGO_TARGET_DIR for an explicit component build directory.'
             }
             if ($env:CARGO_TARGET_DIR) {
-                $null = node $ArtifactAllocator --parent-info
-                if ($env:CIRNET_ARTIFACTS_SESSION -or $env:NETCIRCUIT_ARTIFACTS_SESSION) {
-                    $owned = node $ArtifactAllocator
+                if ($null -ne $env:CIRNET_LOCAL_STORAGE_ROOT) {
+                    $owned = (node $ArtifactAllocator --session-info | ConvertFrom-Json).directory
                     $relative = [IO.Path]::GetRelativePath($owned, $env:CARGO_TARGET_DIR)
                     if ([IO.Path]::IsPathRooted($relative) -or $relative -match '^\.\.(?:[\\/]|$)') {
                         throw 'CARGO_TARGET_DIR conflicts with the inherited artifact session.'

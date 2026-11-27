@@ -18,7 +18,29 @@ fn build_scope_is_explicit_and_orders_dependencies() {
             Repo::Remote
         ]
     );
-    assert!(app.try_get_matches_from(["cnl", "build", "--all"]).is_ok());
+    assert!(
+        app.clone()
+            .try_get_matches_from(["cnl", "build", "--all"])
+            .is_ok()
+    );
+    assert!(
+        app.clone()
+            .try_get_matches_from(["cnl", "build", "--all", "--reuse-candidate"])
+            .is_err()
+    );
+    assert!(
+        app.try_get_matches_from([
+            "cnl",
+            "build",
+            "--all",
+            "--reuse-candidate",
+            "--verification-evidence",
+            "result.json",
+            "--verification-sha256",
+            &"a".repeat(64),
+        ])
+        .is_ok()
+    );
 }
 
 #[test]

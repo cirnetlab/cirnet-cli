@@ -197,3 +197,5 @@ source ./cnl-completion.bash
 ## Local development storage
 
 Set `CIRNET_LOCAL_STORAGE_ROOT` in the invoking process. The CLI uses the workspace Contracts allocator for component development output. Retain `CIRNET_ARTIFACTS_SESSION` for repeated commands on the same worktree. Keep any `CARGO_TARGET_DIR` override inside the session. System assembly uses the Remote namespace. Candidate selection and runtime profile state keep their existing ownership.
+
+From an x64 MSVC developer shell, use `cnl build --all --reuse-candidate --receipt <ASSEMBLY_RECEIPT> --verification-evidence <RESULT> --verification-sha256 <HASH>` to reuse a reviewed candidate. The command checks the live source selection, published manifest and packaged browser evidence before updating the profile pointer. `cnl build --all` requests a fresh candidate. With an inherited component session, all selected component repositories must belong to its verified context. Related CLI build and test operations take an exclusive lock on that session.
