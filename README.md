@@ -114,5 +114,3 @@ The Vue/TypeScript interface belongs to `cirnet-interface`; the Rust REST/WebSoc
 | `cnl stop` | Stop the CLI-managed runtime session |
 | `cnl verify` | Verify the native candidate |
 | `cnl setup --browser` | Install Chromium for Playwright (optional) |
-
-**Documentation:** [Vietnamese guide](docs/vi/index.md) · [English guide](docs/en/index.md) · [Command reference VI](docs/vi/commands.md) · [Command reference EN](docs/en/commands.md)
