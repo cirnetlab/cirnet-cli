@@ -2,7 +2,7 @@
 
 [English](../en/index.md) · [Tham chiếu lệnh CNL và Cargo](commands.md)
 
-`cnl` build và vận hành hệ thống phát triển Windows x64. Remote quản lý bộ đầu vào chính xác, manifest và trình tự dừng Hardware và Simulator. CLI dùng Interface hiện có và tuân theo [kiến trúc mục tiêu CIRNETLAB](https://github.com/cirnetlab/cirnet-remote/blob/master/docs/cirnetlab-architecture-vi.md).
+`cnl` build và vận hành hệ thống phát triển Windows x64. Remote quản lý bộ đầu vào chính xác, manifest và trình tự dừng Hardware và Simulator. CLI dùng Interface hiện có và tuân theo [kiến trúc mục tiêu CIRNETLAB](https://github.com/cirnetlab/cirnet-rules/blob/master/docs/tai-lieu-kien-tuc-he-thong/cirnetlab-architecture-vi.md).
 
 ## Build và chạy
 
@@ -43,4 +43,4 @@ Dùng `cnl build --repo <khóa>` và `cnl verify --repo <khóa>` để chạy th
 
 Dùng `cnl repos discover` hoặc `cnl repos status` để kiểm tra các repo. Clone và update yêu cầu chỉ định repo. Update yêu cầu nhánh sạch và trỏ tới origin CIRNETLAB tương ứng. Dùng `--json` để nhận báo cáo có cấu trúc.
 
-Phiên bản phát triển hiện tại là `0.3.0-dev.1`. [Changelog](../changelogs/README.md)
+Phiên bản phát triển hiện tại là `0.3.0-dev.1`. [Changelog](../../CHANGELOG.md)

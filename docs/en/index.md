@@ -2,7 +2,7 @@
 
 [Tiếng Việt](../vi/index.md) · [CNL and Cargo command reference](commands.md)
 
-`cnl` builds and operates the Windows x64 development stack. Remote owns the exact system selection, manifests, and the Hardware and Simulator shutdown sequence. The CLI uses the existing Interface and exposes the [CIRNETLAB target architecture](https://github.com/cirnetlab/cirnet-remote/blob/master/docs/cirnetlab-architecture-en.md).
+`cnl` builds and operates the Windows x64 development stack. Remote owns the exact system selection, manifests, and the Hardware and Simulator shutdown sequence. The CLI uses the existing Interface and exposes the [CIRNETLAB target architecture](https://github.com/cirnetlab/cirnet-rules/blob/master/docs/tai-lieu-kien-tuc-he-thong/cirnetlab-architecture-en.md).
 
 ## Build and run
 
@@ -43,4 +43,4 @@ Use `cnl build --repo <key>` and `cnl verify --repo <key>` for scoped checks. Ke
 
 For repository tasks, use `cnl repos discover` or `cnl repos status`. Clone and update require named repositories, and updates require a clean branch tracking its expected CIRNETLAB origin. Pass `--json` for structured reports.
 
-Current development version: `0.3.0-dev.1`. [Changelog](../changelogs/README.md)
+Current development version: `0.3.0-dev.1`. [Changelog](../../CHANGELOG.md)
