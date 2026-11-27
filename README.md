@@ -1,5 +1,7 @@
 # CIRNETLAB CLI
 
+[English documentation](docs/en/index.md) · [Tài liệu tiếng Việt](docs/vi/index.md) · [Changelog](docs/changelogs/README.md)
+
 ![GitHub repo size](https://img.shields.io/github/repo-size/cirnetlab/cirnet-cli)
 [![GitHub License](https://img.shields.io/github/license/cirnetlab/cirnet-cli)](LICENSE)
 

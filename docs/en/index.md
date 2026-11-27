@@ -43,4 +43,4 @@ Use `cnl build --repo <key>` and `cnl verify --repo <key>` for scoped checks. Ke
 
 For repository tasks, use `cnl repos discover` or `cnl repos status`. Clone and update require named repositories, and updates require a clean branch tracking its expected CIRNETLAB origin. Pass `--json` for structured reports.
 
-Current release line: `0.3.0-dev.1`. [Changelog](../changelogs/README.md)
+Current development version: `0.3.0-dev.1`. [Changelog](../changelogs/README.md)

@@ -43,4 +43,4 @@ Dùng `cnl build --repo <khóa>` và `cnl verify --repo <khóa>` để chạy th
 
 Dùng `cnl repos discover` hoặc `cnl repos status` để kiểm tra các repo. Clone và update yêu cầu chỉ định repo. Update yêu cầu nhánh sạch và trỏ tới origin CIRNETLAB tương ứng. Dùng `--json` để nhận báo cáo có cấu trúc.
 
-Dải phát hành hiện tại là `0.3.0-dev.1`. [Changelog](../changelogs/README.md)
+Phiên bản phát triển hiện tại là `0.3.0-dev.1`. [Changelog](../changelogs/README.md)
